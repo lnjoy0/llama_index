@@ -1,0 +1,43 @@
+name: Agentic Code Sec Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+          - '**/*.md'
+          - '**/*.txt'
+          - '**/*.json'
+          - '**/*.yml'
+          - '**/*.yaml'
+          - 'docs/**'
+  workflow_dispatch: # 允许手动触发
+    inputs:
+      debug_mode:
+        description: '是否开启调试模式'
+        required: false
+        type: boolean  # 这样 UI 就会变成勾选框
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true # 如果该 PR 有新的任务，直接停掉正在运行的旧任务
+
+jobs:
+  code-sec-review:
+    name: PR Code Security Review
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run AI Auditor Action
+        uses: lnjoy0/agentic-code-sec-review@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
