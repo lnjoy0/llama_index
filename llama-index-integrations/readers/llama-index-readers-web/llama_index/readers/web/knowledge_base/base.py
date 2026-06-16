@@ -126,3 +126,43 @@ class KnowledgeBaseWebReader(BaseReader):
         print("scraped:", url)
         return {"title": title, "subtitle": subtitle, "body": body, "url": url}
 
+    def get_article_urls(
+        self, browser: Any, root_url: str, current_url: str, max_depth: int = 100
+    ) -> List[str]:
+        """
+        Recursively crawl through the knowledge base to find a list of articles.
+
+        Args:
+            browser (Any): a Playwright Chromium browser.
+            root_url (str): root URL of the knowledge base.
+            current_url (str): current URL that is being crawled.
+
+        Returns:
+            List[str]: a list of URLs of found articles.
+
+        """
+        page = browser.new_page(ignore_https_errors=True)
+        page.set_default_timeout(60000)
+        page.goto(current_url, wait_until="domcontentloaded")
+
+        # If this is a leaf node aka article page, return itself
+        if self.article_path in current_url:
+            print("Found an article: ", current_url)
+            page.close()
+            return [current_url]
+
+        # Otherwise crawl this page and find all the articles linked from it
+        article_urls = []
+        links = []
+
+        for link_selector in self.link_selectors:
+            ahrefs = page.query_selector_all(link_selector)
+            links.extend(ahrefs)
+
+        for link in links:
+            url = root_url + page.evaluate("(node) => node.getAttribute('href')", link)
+            article_urls.extend(
+                self.get_article_urls(browser, root_url, url, max_depth)
+            )
+
+        page.close()
