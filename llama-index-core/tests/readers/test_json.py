@@ -1,10 +1,7 @@
 """Test file reader."""
 
-import json
-import sys
 from tempfile import TemporaryDirectory
 
-import pytest
 from llama_index.core.readers.json import JSONReader
 
 
@@ -96,4 +93,3 @@ def test_clean_json() -> None:
         reader1 = JSONReader(clean_json=True)
         data1 = reader1.load_data(file_name)
         assert data1[0].get_content() == '"a": {\n"b": "c"'
-
