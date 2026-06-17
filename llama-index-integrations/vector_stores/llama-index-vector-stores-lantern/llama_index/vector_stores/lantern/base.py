@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Type
+from typing import Any, List, NamedTuple, Optional, Type, TYPE_CHECKING
 
 import asyncpg  # noqa
 import psycopg2  # noqa
@@ -648,6 +648,18 @@ class LanternVectorStore(BasePydanticVectorStore):
 
         return self._db_rows_to_query_result(results)
 
+    def delete(self, ref_doc_id: str, **delete_kwargs: Any) -> None:
+        import sqlalchemy
+
+        self._initialize()
+        with self._session() as session, session.begin():
+            stmt = sqlalchemy.text(
+                f"DELETE FROM {self.schema_name}.data_{self.table_name} where "
+                f"(metadata_->>'doc_id')::text = '{ref_doc_id}' "
+            )
+
+            session.execute(stmt)
+            session.commit()
 
 
 def _dedup_results(results: List[DBEmbeddingRow]) -> List[DBEmbeddingRow]:

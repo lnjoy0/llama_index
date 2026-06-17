@@ -1,23 +1,22 @@
-"""
-DeepLake vector store index.
+"""DeepLake vector store index.
 
 An index that is built within DeepLake.
 
 """
 
 import logging
-import uuid
-from typing import Any, Callable, Dict, Iterable, List, Optional, Union, cast
+from typing import Any, List, Optional, cast, Dict, Union, Iterable, Callable
 
+import uuid
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.schema import BaseNode, MetadataMode, TextNode
 from llama_index.core.vector_stores.types import (
     BasePydanticVectorStore,
-    FilterCondition,
-    FilterOperator,
-    MetadataFilters,
     VectorStoreQuery,
     VectorStoreQueryResult,
+    MetadataFilters,
+    FilterCondition,
+    FilterOperator,
 )
 from llama_index.core.vector_stores.utils import (
     metadata_dict_to_node,
@@ -174,6 +173,24 @@ try:
                 view = self.ds.query(query)
                 return self.__view_to_docs(view)
 
+            def delete(
+                self,
+                ids: List[str],
+                filter: Optional[Dict[str, Any]] = None,
+                delete_all: Optional[bool] = None,
+            ) -> None:
+                if ids is not None:
+                    print(
+                        f"SELECT * from (select *,ROW_NUMBER() as r_id) where id IN ({str(ids)[1:-1]})"
+                    )
+                    view = self.ds.query(
+                        f"SELECT * from (select *,ROW_NUMBER() as r_id) where id IN ({str(ids)[1:-1]})"
+                    )
+                    dlist = view["r_id"][:].tolist()
+                    dlist.reverse()
+                    print(dlist)
+                    for _id in dlist:
+                        self.ds.delete(int(_id))
 
             def dataset(self) -> Any:
                 return self.ds
@@ -202,6 +219,16 @@ try:
                         "['cos', 'cosine_similarity', 'l2', 'l2_norm']"
                     )
 
+            def __generate_where_clause(self, filter: Dict[str, Any]) -> str:
+                if filter is None:
+                    return ""
+                where_clause = "WHERE "
+                for key, value in filter.items():
+                    if isinstance(value, list):
+                        where_clause += f"{key} IN ({str(value)[1:-1]}) AND "
+                    else:
+                        where_clause += f"{key} == {value} AND "
+                return where_clause[:-5]
 
             def __create_dataset(self, emb_size=None) -> None:
                 if emb_size is None:

@@ -7,21 +7,19 @@ import json
 import logging
 import math
 import os
-import re
 import uuid
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    ClassVar,
     Dict,
     List,
     Optional,
-    Tuple,
     Type,
     TypeVar,
     cast,
+    ClassVar,
 )
 
 from llama_index.core.schema import (
@@ -43,6 +41,7 @@ if TYPE_CHECKING:
 
 from llama_index.core.vector_stores.utils import metadata_dict_to_node
 from pydantic import PrivateAttr
+
 
 logger = logging.getLogger(__name__)
 log_level = os.getenv("LOG_LEVEL", "ERROR").upper()
@@ -118,12 +117,17 @@ column_config: Dict = {
 }
 
 
+def _stringify_list(lst: List) -> str:
+    return "[" + ",".join(str(item) for item in lst) + "]"
+
+
 def _table_exists(connection: Connection, table_name: str) -> bool:
     try:
         import oracledb
     except ImportError as e:
         raise ImportError(
-            "Unable to import oracledb, please install with `pip install -U oracledb`."
+            "Unable to import oracledb, please install with "
+            "`pip install -U oracledb`."
         ) from e
     try:
         with connection.cursor() as cursor:
@@ -176,6 +180,21 @@ def _get_index_name(base_name: str) -> str:
     return f"{base_name}_{unique_id}"
 
 
+@_handle_exceptions
+def _create_table(connection: Connection, table_name: str) -> None:
+    if not _table_exists(connection, table_name):
+        with connection.cursor() as cursor:
+            column_definitions = ", ".join(
+                [f'{k} {v["type"]}' for k, v in column_config.items()]
+            )
+
+            # Generate the final DDL statement
+            ddl = f"CREATE TABLE {table_name} (\n  {column_definitions}\n)"
+
+            cursor.execute(ddl)
+        logger.info("Table created successfully...")
+    else:
+        logger.info("Table already exists...")
 
 
 @_handle_exceptions
@@ -439,6 +458,32 @@ class OraLlamaVS(BasePydanticVectorStore):
     def class_name(cls) -> str:
         return "OraLlamaVS"
 
+    def _append_meta_filter_condition(
+        self, where_str: Optional[str], exact_match_filter: list
+    ) -> str:
+        filter_str = " AND ".join(
+            f"JSON_VALUE({self.metadata_column}, '$.{filter_item.key}') = '{filter_item.value}'"
+            for filter_item in exact_match_filter
+        )
+        if where_str is None:
+            where_str = filter_str
+        else:
+            where_str += " AND " + filter_str
+        return where_str
+
+    def _build_insert(self, values: List[BaseNode]) -> (str, List[tuple]):
+        _data = []
+        for item in values:
+            item_values = tuple(
+                column["extract_func"](item) for column in column_config.values()
+            )
+            _data.append(item_values)
+
+        dml = f"""
+           INSERT INTO {self.table_name} ({", ".join(column_config.keys())})
+           VALUES ({", ".join([':' + str(i + 1) for i in range(len(column_config))])})
+        """
+        return dml, _data
 
     def _build_query(
         self, distance_function: str, k: int, where_str: Optional[str] = None
@@ -524,6 +569,89 @@ class OraLlamaVS(BasePydanticVectorStore):
     def drop(self) -> None:
         drop_table_purge(self._client, self.table_name)
 
+    @_handle_exceptions
+    def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
+        distance_function = _get_distance_function(self.distance_strategy)
+        where_str = (
+            f"doc_id in {_stringify_list(query.doc_ids)}" if query.doc_ids else None
+        )
+
+        if query.filters is not None:
+            where_str = self._append_meta_filter_condition(
+                where_str, query.filters.filters
+            )
+
+        # build query sql
+        query_sql = self._build_query(
+            distance_function, query.similarity_top_k, where_str
+        )
+        """
+        if query.mode == VectorStoreQueryMode.HYBRID and query.query_str is not None:
+            amplify_ratio = self.AMPLIFY_RATIO_LE5
+            if 5 < query.similarity_top_k < 50:
+                amplify_ratio = self.AMPLIFY_RATIO_GT5
+            if query.similarity_top_k > 50:
+                amplify_ratio = self.AMPLIFY_RATIO_GT50
+            query_sql = self._build_hybrid_query(
+                self._build_query(
+                    query_embed=query.query_embedding,
+                    k=query.similarity_top_k,
+                    where_str=where_str,
+                    limit=query.similarity_top_k * amplify_ratio,
+                ),
+                query.query_str,
+                query.similarity_top_k,
+            )
+            logger.debug(f"hybrid query_statement={query_statement}")
+        """
+        embedding = array.array("f", query.query_embedding)
+        with self._client.cursor() as cursor:
+            cursor.execute(query_sql, embedding=embedding)
+            results = cursor.fetchall()
+
+            similarities = []
+            ids = []
+            nodes = []
+            for result in results:
+                doc_id = result[1]
+                text = self._get_clob_value(result[2])
+                node_info = (
+                    json.loads(result[3]) if isinstance(result[3], str) else result[3]
+                )
+                metadata = (
+                    json.loads(result[4]) if isinstance(result[4], str) else result[4]
+                )
+
+                if query.node_ids:
+                    if result[0] not in query.node_ids:
+                        continue
+
+                if isinstance(node_info, dict):
+                    start_char_idx = node_info.get("start", None)
+                    end_char_idx = node_info.get("end", None)
+                try:
+                    node = metadata_dict_to_node(metadata)
+                    node.set_content(text)
+                except Exception:
+                    # Note: deprecated legacy logic for backward compatibility
+
+                    node = TextNode(
+                        id_=result[0],
+                        text=text,
+                        metadata=metadata,
+                        start_char_idx=start_char_idx,
+                        end_char_idx=end_char_idx,
+                        relationships={
+                            NodeRelationship.SOURCE: RelatedNodeInfo(node_id=doc_id)
+                        },
+                    )
+
+                nodes.append(node)
+                similarities.append(1.0 - math.exp(-result[5]))
+                ids.append(result[0])
+            return VectorStoreQueryResult(
+                nodes=nodes, similarities=similarities, ids=ids
+            )
 
     @classmethod
     @_handle_exceptions

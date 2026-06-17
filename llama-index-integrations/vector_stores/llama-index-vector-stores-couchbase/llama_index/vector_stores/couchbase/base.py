@@ -2,21 +2,22 @@
 Couchbase Vector store interface.
 """
 
-import logging
 from typing import Any, Dict, List, Optional
 
-from llama_index.core.bridge.pydantic import PrivateAttr
+import logging
+
 from llama_index.core.schema import BaseNode, MetadataMode, TextNode
 from llama_index.core.vector_stores.types import (
     BasePydanticVectorStore,
-    MetadataFilters,
     VectorStoreQuery,
     VectorStoreQueryResult,
+    MetadataFilters,
 )
 from llama_index.core.vector_stores.utils import (
-    metadata_dict_to_node,
     node_to_metadata_dict,
+    metadata_dict_to_node,
 )
+from llama_index.core.bridge.pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +301,25 @@ class CouchbaseVectorStore(BasePydanticVectorStore):
             logger.debug("Inserted batch of documents to Couchbase")
         return doc_ids
 
+    def delete(self, ref_doc_id: str, **kwargs: Any) -> None:
+        """
+        Delete a document by its reference document ID.
+
+        Args:
+            ref_doc_id: The reference document ID to be deleted.
+
+        Returns:
+            None
+        """
+        try:
+            document_field = self._metadata_key + ".ref_doc_id"
+            self._scope.query(
+                f"DELETE FROM `{self._collection_name}` WHERE {document_field} = '{ref_doc_id}'"
+            ).execute()
+            logger.debug(f"Deleted document {ref_doc_id}")
+        except Exception:
+            logger.error(f"Error deleting document {ref_doc_id}")
+            raise
 
     def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
         """
