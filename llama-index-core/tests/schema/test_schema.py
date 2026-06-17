@@ -1,5 +1,4 @@
 import base64
-import httpx
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -251,6 +250,19 @@ def test_image_document_image():
     assert doc.image == "MTIzNDU2Nzg5"
 
 
+def test_image_document_path():
+    mock_path = Path(__file__)
+    doc = ImageDocument(id_="test", image_path=mock_path)
+    assert doc.image_path == str(mock_path)
+    doc.image_path = str(mock_path.parent)
+    assert doc.image_path == str(mock_path.parent)
+
+
+def test_image_document_url():
+    doc = ImageDocument(id_="test", image_url="https://example.com/")
+    assert doc.image_url == "https://example.com/"
+    doc.image_url = "https://foo.org"
+    assert doc.image_url == "https://foo.org/"
 
 
 def test_image_document_mimetype():
@@ -269,6 +281,12 @@ def test_image_document_embeddings():
     assert doc.text_resource.embeddings == {"dense": [1.0, 2.0, 3.0]}
 
 
+def test_image_document_path_serialization():
+    doc = ImageDocument(image_path=Path("test.png"))
+    assert doc.model_dump()["image_resource"]["path"] == "test.png"
+
+    new_doc = ImageDocument(**doc.model_dump())
+    assert new_doc.image_resource.path == Path("test.png")
 
 
 def test_image_block_resolve_image(png_1px: bytes, png_1px_b64: bytes):

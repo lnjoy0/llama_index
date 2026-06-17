@@ -32,7 +32,6 @@ import requests
 from dataclasses_json import DataClassJsonMixin
 from deprecated import deprecated
 from typing_extensions import Self
-from PIL import Image
 
 from llama_index.core.bridge.pydantic import (
     AnyUrl,
@@ -1224,6 +1223,27 @@ class Document(Node):
 class ImageDocument(Document):
     """Backward compatible wrapper around Document containing an image."""
 
+    def __init__(self, **kwargs: Any) -> None:
+        image = kwargs.pop("image", None)
+        image_path = kwargs.pop("image_path", None)
+        image_url = kwargs.pop("image_url", None)
+        image_mimetype = kwargs.pop("image_mimetype", None)
+        text_embedding = kwargs.pop("text_embedding", None)
+
+        if image:
+            kwargs["image_resource"] = MediaResource(
+                data=image, mimetype=image_mimetype
+            )
+        elif image_path:
+            kwargs["image_resource"] = MediaResource(
+                path=image_path, mimetype=image_mimetype
+            )
+        elif image_url:
+            kwargs["image_resource"] = MediaResource(
+                url=image_url, mimetype=image_mimetype
+            )
+
+        super().__init__(**kwargs)
 
     @property
     def image(self) -> str | None:
