@@ -61,8 +61,7 @@ DISTANCE_MAPPING = {
 
 
 class ClickHouseSettings:
-    """
-    ClickHouse Client Configuration.
+    """ClickHouse Client Configuration.
 
     Args:
         table (str): Table name to operate on.
@@ -115,8 +114,7 @@ class ClickHouseSettings:
 
 
 class ClickHouseVectorStore(BasePydanticVectorStore):
-    """
-    ClickHouse Vector Store.
+    """ClickHouse Vector Store.
     In this vector store, embeddings and docs are stored within an existing
     ClickHouse cluster.
     During query time, the index uses ClickHouse to query for the top
@@ -263,31 +261,6 @@ class ClickHouseVectorStore(BasePydanticVectorStore):
         """Get client."""
         return self._client
 
-    def create_table(self, dimension: int) -> None:
-        index = ""
-        settings = {"allow_experimental_object_type": "1"}
-        if self._config.index_type.lower() == "hnsw":
-            scalarKind = "f32"
-            if self._config.index_params and "ScalarKind" in self._config.index_params:
-                scalarKind = self._config.index_params["ScalarKind"]
-            index = f"INDEX hnsw_indx vector TYPE usearch('{DISTANCE_MAPPING[self._config.metric]}', '{scalarKind}')"
-            settings["allow_experimental_usearch_index"] = "1"
-        elif self._config.index_type.lower() == "annoy":
-            numTrees = 100
-            if self._config.index_params and "NumTrees" in self._config.index_params:
-                numTrees = self._config.index_params["NumTrees"]
-            index = f"INDEX annoy_indx vector TYPE annoy('{DISTANCE_MAPPING[self._config.metric]}', {numTrees})"
-            settings["allow_experimental_annoy_index"] = "1"
-        schema_ = f"""
-            CREATE TABLE IF NOT EXISTS {self._config.database}.{self._config.table}(
-                {",".join([f"{k} {v['type']}" for k, v in self._column_config.items()])},
-                CONSTRAINT vector_length CHECK length(vector) = {dimension},
-                {index}
-            ) ENGINE = MergeTree ORDER BY id
-            """
-        self._dim = dimension
-        self._client.command(schema_, settings=settings)
-        self._table_existed = True
 
     def _upload_batch(
         self,
@@ -308,106 +281,9 @@ class ClickHouseVectorStore(BasePydanticVectorStore):
             column_type_names=self._column_type_names,
         )
 
-    def _build_text_search_statement(
-        self, query_str: str, similarity_top_k: int
-    ) -> str:
-        safe_tokens = []
-        for token in _default_tokenizer(query_str):
-            # First escape regex special characters
-            regex_escaped = re.escape(token)
-            # Then escape for SQL string
-            sql_escaped = escape_str(regex_escaped)
-            safe_tokens.append(sql_escaped)
 
-        terms_pattern = [f"\\\\b(?i){token}\\\\b" for token in safe_tokens]
-        joined_tokens_pattern = escape_str("|".join(safe_tokens))
-        column_keys = [k for k in self._column_config if k != "vector"]
-        column_list = ",".join(column_keys)
-        return (
-            f"SELECT {column_list}, score "
-            f"FROM {self._config.database}.{self._config.table} WHERE score > 0 "
-            f"ORDER BY length(multiMatchAllIndices(text, {terms_pattern})) "
-            f"AS score DESC, "
-            f"log(1 + countMatches(text, '\\\\b(?i)({joined_tokens_pattern})\\\\b')) "
-            f"AS d2 DESC limit {similarity_top_k}"
-        )
 
-    def _build_hybrid_search_statement(
-        self, stage_one_sql: str, query_str: str, similarity_top_k: int
-    ) -> str:
-        safe_tokens = []
-        for token in _default_tokenizer(query_str):
-            # First escape regex special characters
-            regex_escaped = re.escape(token)
-            # Then escape for SQL string
-            sql_escaped = escape_str(regex_escaped)
-            safe_tokens.append(sql_escaped)
 
-        terms_pattern = [f"\\\\b(?i){token}\\\\b" for token in safe_tokens]
-        joined_tokens_pattern = escape_str("|".join(safe_tokens))
-        column_keys = [k for k in self._column_config if k != "vector"]
-        column_list = ",".join(column_keys)
-        return (
-            f"SELECT {column_list}, score "
-            f"FROM ({stage_one_sql}) tempt "
-            f"ORDER BY length(multiMatchAllIndices(text, {terms_pattern})) "
-            f"AS d1 DESC, "
-            f"log(1 + countMatches(text, '\\\\\\\\b(?i)({joined_tokens_pattern})\\\\\\\\b')) "
-            f"AS d2 DESC limit {similarity_top_k}"
-        )
-
-    def _append_meta_filter_condition(
-        self, where_str: Optional[str], exact_match_filter: list
-    ) -> str:
-        if not exact_match_filter:
-            return where_str or ""
-
-        filter_conditions = []
-        for filter_item in exact_match_filter:
-            # Use JSONExtractString function with properly escaped keys and values
-            key = escape_str(filter_item.key)
-            value = escape_str(filter_item.value)
-            filter_conditions.append(
-                f"JSONExtractString({self.metadata_column}, '{key}') = '{value}'"
-            )
-
-        filter_str = " AND ".join(filter_conditions)
-
-        if not where_str:
-            return filter_str
-        return f"{where_str} AND {filter_str}"
-
-    def add(
-        self,
-        nodes: List[BaseNode],
-        **add_kwargs: Any,
-    ) -> List[str]:
-        """
-        Add nodes to index.
-
-        Args:
-            nodes: List[BaseNode]: list of nodes with embeddings
-        """
-        if not nodes:
-            return []
-
-        if not self._table_existed:
-            self.create_table(len(nodes[0].get_embedding()))
-
-        for batch in iter_batch(nodes, self._config.batch_size):
-            self._upload_batch(batch=batch)
-
-        return [result.node_id for result in nodes]
-
-    def delete(self, ref_doc_id: str, **delete_kwargs: Any) -> None:
-        """
-        Delete nodes using with ref_doc_id.
-
-        Args:
-            ref_doc_id (str): The doc_id of the document to delete.
-        """
-        query = f"DELETE FROM {self._config.database}.{self._config.table} WHERE doc_id = %(ref_doc_id)s"
-        self._client.command(query, parameters={"ref_doc_id": ref_doc_id})
 
     def drop(self) -> None:
         """Drop ClickHouse table."""
@@ -418,8 +294,7 @@ class ClickHouseVectorStore(BasePydanticVectorStore):
     def query(
         self, query: VectorStoreQuery, where: Optional[str] = None, **kwargs: Any
     ) -> VectorStoreQueryResult:
-        """
-        Query index for top k most similar nodes.
+        """Query index for top k most similar nodes.
 
         Args:
             query (VectorStoreQuery): query
