@@ -1,0 +1,40 @@
+name: Agentic Code Sec Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+          - '**/*.md'
+          - '**/*.json'
+          - '**/*.yml'
+          - '**/*.yaml'
+          - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  code-sec-review:
+    name: PR Code Security Review
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Run AI Auditor Action
+        uses: lnjoy0/agentic-code-sec-review@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          llm_api_key: ${{ secrets.LLM_API_KEY }}
+          llm_base_url: https://api.deepseek.com
+          llm_model_name: deepseek-v4-flash
