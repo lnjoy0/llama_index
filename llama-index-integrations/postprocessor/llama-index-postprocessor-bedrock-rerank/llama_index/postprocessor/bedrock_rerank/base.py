@@ -18,7 +18,7 @@ class Models(str, Enum):
     COHERE_RERANK_V3_5 = "cohere.rerank-v3-5:0"
 
 
-class AWSBedrockRerank(BaseNodePostprocessor):
+class BedrockRerank(BaseNodePostprocessor):
     top_n: int = Field(default=2, description="Top N nodes to return.")
     rerank_model_name: str = Field(
         default=Models.COHERE_RERANK_V3_5.value,
@@ -47,8 +47,7 @@ class AWSBedrockRerank(BaseNodePostprocessor):
     region_name: Optional[str] = Field(
         default=None,
         description=(
-            "AWS region name to use. "
-            "Uses region configured in AWS CLI if not passed."
+            "AWS region name to use. Uses region configured in AWS CLI if not passed."
         ),
     )
     botocore_session: Optional[Any] = Field(
@@ -254,3 +253,7 @@ class AWSBedrockRerank(BaseNodePostprocessor):
 
         dispatcher.event(ReRankEndEvent(nodes=new_nodes))
         return new_nodes
+
+
+# backwards compatibility name change
+AWSBedrockRerank = BedrockRerank

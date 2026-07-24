@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -9,7 +10,16 @@ from tenacity import (
     wait_exponential,
 )
 
-from llama_index.core.base.llms.types import ChatMessage, ChatResponse, MessageRole
+from llama_index.core.base.llms.types import (
+    ChatMessage,
+    ChatResponse,
+    MessageRole,
+    ImageBlock,
+    TextBlock,
+    ContentBlock,
+    AudioBlock,
+    DocumentBlock,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +45,8 @@ BEDROCK_MODELS = {
     "anthropic.claude-3-5-sonnet-20241022-v2:0": 200000,
     "anthropic.claude-3-5-haiku-20241022-v1:0": 200000,
     "anthropic.claude-3-7-sonnet-20250219-v1:0": 200000,
+    "anthropic.claude-opus-4-20250514-v1:0": 200000,
+    "anthropic.claude-sonnet-4-20250514-v1:0": 200000,
     "ai21.j2-mid-v1": 8192,
     "ai21.j2-ultra-v1": 8192,
     "cohere.command-text-v14": 4096,
@@ -59,6 +71,7 @@ BEDROCK_MODELS = {
     "mistral.mistral-large-2407-v1:0": 32000,
     "ai21.jamba-1-5-mini-v1:0": 256000,
     "ai21.jamba-1-5-large-v1:0": 256000,
+    "deepseek.r1-v1:0": 128000,
 }
 
 BEDROCK_FUNCTION_CALLING_MODELS = (
@@ -72,6 +85,8 @@ BEDROCK_FUNCTION_CALLING_MODELS = (
     "anthropic.claude-3-5-sonnet-20241022-v2:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0",
     "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "anthropic.claude-opus-4-20250514-v1:0",
+    "anthropic.claude-sonnet-4-20250514-v1:0",
     "cohere.command-r-v1:0",
     "cohere.command-r-plus-v1:0",
     "mistral.mistral-large-2402-v1:0",
@@ -96,6 +111,8 @@ BEDROCK_INFERENCE_PROFILE_SUPPORTED_MODELS = (
     "anthropic.claude-3-5-sonnet-20241022-v2:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0",
     "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "anthropic.claude-opus-4-20250514-v1:0",
+    "anthropic.claude-sonnet-4-20250514-v1:0",
     "meta.llama3-1-8b-instruct-v1:0",
     "meta.llama3-1-70b-instruct-v1:0",
     "meta.llama3-2-1b-instruct-v1:0",
@@ -103,6 +120,7 @@ BEDROCK_INFERENCE_PROFILE_SUPPORTED_MODELS = (
     "meta.llama3-2-11b-instruct-v1:0",
     "meta.llama3-2-90b-instruct-v1:0",
     "meta.llama3-3-70b-instruct-v1:0",
+    "deepseek.r1-v1:0",
 )
 
 
@@ -112,7 +130,7 @@ def get_model_name(model_name: str) -> str:
     REGION_PREFIXES = ["us.", "eu.", "apac."]
 
     # If no region prefix, return the original model name
-    if not any(model_name.startswith(prefix) for prefix in REGION_PREFIXES):
+    if not any(prefix in model_name for prefix in REGION_PREFIXES):
         return model_name
 
     # Remove region prefix to get the base model name
@@ -160,6 +178,62 @@ def __merge_common_role_msgs(
     return postprocessed_messages
 
 
+def _content_block_to_bedrock_format(
+    block: ContentBlock, role: MessageRole
+) -> Optional[Dict[str, Any]]:
+    """Convert content block to AWS Bedrock Converse API required format."""
+    if isinstance(block, TextBlock):
+        return {
+            "text": block.text,
+        }
+    elif isinstance(block, DocumentBlock):
+        if not block.data:
+            file_buffer = block.resolve_document()
+            with file_buffer as f:
+                data = f.read()
+        else:
+            data = base64.b64decode(block.data)
+        title = block.title
+        # NOTE: At the time of writing, "txt" format works for all file types
+        # The API then infers the format from the file type based on the bytes
+        return {"document": {"format": "txt", "name": title, "source": {"bytes": data}}}
+    elif isinstance(block, ImageBlock):
+        if role != MessageRole.USER:
+            logger.warning(
+                "Bedrock Converse API only supports image blocks for user messages."
+            )
+            return None
+        # NOTE: Bedrock Converse API accepts raw image bytes directly
+        # No need to convert the image to base64 or UTF-8 format
+        # The image will be passed to the API in its raw binary form
+        img_format = __get_img_format_from_image_mimetype(block.image_mimetype)
+        raw_image_bytes = block.resolve_image(as_base64=False).read()
+        return {"image": {"format": img_format, "source": {"bytes": raw_image_bytes}}}
+    elif isinstance(block, AudioBlock):
+        logger.warning("Audio blocks are not supported in Bedrock Converse API.")
+        return None
+    else:
+        logger.warning(f"Unsupported block type: {type(block)}")
+        return None
+
+
+def __get_img_format_from_image_mimetype(image_mimetype: str) -> str:
+    """Get the image format from the image mimetype."""
+    mapping = {
+        "image/jpeg": "jpeg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }
+    img_format = mapping.get(image_mimetype)
+    if img_format is None:
+        logger.warning(
+            f"Unsupported image mimetype: {image_mimetype}. Bedrock Converse API only supports {', '.join(mapping.keys())}, defaulting to png."
+        )
+        return "png"
+    return img_format
+
+
 def messages_to_converse_messages(
     messages: Sequence[ChatMessage],
 ) -> Tuple[Sequence[Dict[str, Any]], str]:
@@ -173,14 +247,14 @@ def messages_to_converse_messages(
         Tuple of:
         - List of AWS Bedrock Converse messages
         - System prompt
+
     """
     converse_messages = []
     system_prompt = ""
     for message in messages:
         if message.role == MessageRole.SYSTEM:
-            # get the system prompt
             system_prompt += message.content + "\n"
-        elif message.role == MessageRole.FUNCTION or message.role == MessageRole.TOOL:
+        elif message.role in [MessageRole.FUNCTION, MessageRole.TOOL]:
             # convert tool output to the AWS Bedrock Converse format
             content = {
                 "toolResult": {
@@ -192,24 +266,32 @@ def messages_to_converse_messages(
                     ],
                 }
             }
-            status = message.additional_kwargs.get("status")
-            if status:
+            if status := message.additional_kwargs.get("status"):
                 content["toolResult"]["status"] = status
             converse_messages.append(
                 {
-                    "role": "user",
+                    "role": MessageRole.USER.value,  # bedrock converse api requires the role to be user
                     "content": [content],
                 }
             )
         else:
-            if message.content:
-                # get the text of the message
+            content = []
+            for block in message.blocks:
+                bedrock_format_block = _content_block_to_bedrock_format(
+                    block=block,
+                    role=message.role,
+                )
+                if bedrock_format_block:
+                    content.append(bedrock_format_block)
+
+            if content:
                 converse_messages.append(
                     {
                         "role": message.role.value,
-                        "content": [{"text": message.content}],
+                        "content": content,
                     }
                 )
+
         # convert tool calls to the AWS Bedrock Converse format
         # NOTE tool calls might show up within any message,
         # e.g. within assistant message or in consecutive tool calls,
@@ -252,6 +334,7 @@ def tools_to_converse_tools(tools: List["BaseTool"]) -> Dict[str, Any]:
 
     Returns:
         AWS Bedrock Converse tools
+
     """
     converse_tools = []
     for tool in tools:
@@ -386,6 +469,7 @@ async def converse_with_retry_async(
     guardrail_identifier: Optional[str] = None,
     guardrail_version: Optional[str] = None,
     trace: Optional[str] = None,
+    boto_client_kwargs: Optional[Dict[str, Any]] = None,
     **kwargs: Any,
 ) -> Any:
     """Use tenacity to retry the completion call."""
@@ -416,6 +500,9 @@ async def converse_with_retry_async(
             if k not in ["tools", "guardrail_identifier", "guardrail_version", "trace"]
         },
     )
+    _boto_client_kwargs = {}
+    if boto_client_kwargs is not None:
+        _boto_client_kwargs |= boto_client_kwargs
 
     ## NOTE: Returning the generator directly from converse_stream doesn't work
     # So, we have to use two separate functions for streaming and non-streaming
@@ -424,12 +511,20 @@ async def converse_with_retry_async(
 
     @retry_decorator
     async def _conversion_with_retry(**kwargs: Any) -> Any:
-        async with session.client("bedrock-runtime", config=config) as client:
+        async with session.client(
+            "bedrock-runtime",
+            config=config,
+            **_boto_client_kwargs,
+        ) as client:
             return await client.converse(**kwargs)
 
     @retry_decorator
     async def _conversion_stream_with_retry(**kwargs: Any) -> Any:
-        async with session.client("bedrock-runtime", config=config) as client:
+        async with session.client(
+            "bedrock-runtime",
+            config=config,
+            **_boto_client_kwargs,
+        ) as client:
             response = await client.converse_stream(**kwargs)
             async for event in response["stream"]:
                 yield event
@@ -450,7 +545,11 @@ def join_two_dicts(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> Dict[str, An
 
     Returns:
         Joined dictionary
+
     """
+    # These keys should be replaced rather than concatenated
+    REPLACE_KEYS = {"toolUseId", "name", "input"}
+
     new_dict = dict1.copy()
     for key, value in dict2.items():
         if key not in new_dict:
@@ -458,6 +557,9 @@ def join_two_dicts(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> Dict[str, An
         else:
             if isinstance(value, dict):
                 new_dict[key] = join_two_dicts(new_dict[key], value)
+            elif key in REPLACE_KEYS:
+                # Replace instead of concatenate for special keys
+                new_dict[key] = value
             else:
                 new_dict[key] += value
     return new_dict

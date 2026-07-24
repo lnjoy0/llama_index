@@ -87,6 +87,7 @@ class Gemini(FunctionCallingLLM):
         resp = llm.complete("Write a poem about a magic backpack")
         print(resp)
         ```
+
     """
 
     model: str = Field(default=GEMINI_MODELS[0], description="The Gemini model to use.")
@@ -388,9 +389,9 @@ class Gemini(FunctionCallingLLM):
             # otherwise, we will make a tool call to the tool choice
             tool_names = [tool.metadata.name for tool in tools]
             if tool_choice not in tool_names:
-                tool_config["function_calling_config"][
-                    "allowed_function_names"
-                ] = tool_names
+                tool_config["function_calling_config"]["allowed_function_names"] = (
+                    tool_names
+                )
             else:
                 tool_config["function_calling_config"]["allowed_function_names"] = [
                     tool_choice

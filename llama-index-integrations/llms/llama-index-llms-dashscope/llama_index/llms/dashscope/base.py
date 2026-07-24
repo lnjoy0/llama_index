@@ -153,7 +153,8 @@ async def astream_call_with_messages(
 
 
 class DashScope(FunctionCallingLLM):
-    """DashScope LLM.
+    """
+    DashScope LLM.
 
     Examples:
         `pip install llama-index-llms-dashscope`
@@ -165,6 +166,7 @@ class DashScope(FunctionCallingLLM):
         response = llm.complete("What is the meaning of life?")
         print(response.text)
         ```
+
     """
 
     """ In Pydantic V2, protected_namespaces is a configuration option used to prevent certain namespace keywords
@@ -609,9 +611,9 @@ class DashScope(FunctionCallingLLM):
                                 tool_call["function"].get("arguments", "").strip()
                             )
                             if function_args:
-                                all_tool_calls[index]["function"][
-                                    "arguments"
-                                ] += function_args
+                                all_tool_calls[index]["function"]["arguments"] += (
+                                    function_args
+                                )
                     yield ChatResponse(
                         message=ChatMessage(
                             role=role,

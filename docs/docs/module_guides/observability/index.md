@@ -125,7 +125,7 @@ Traceloop.init()
 
 #### Guides
 
-- [OpenLLMetry](../../examples/callbacks/OpenLLMetry.ipynb)
+- [OpenLLMetry](../../examples/observability/OpenLLMetry.ipynb)
 
 ![](../../_static/integrations/openllmetry.png)
 
@@ -247,8 +247,6 @@ set_global_handler("literalai")
 
 - [Literal AI integration with Llama Index](https://docs.getliteral.ai/integrations/llama-index)
 - [Build a Q&A application with LLamaIndex and monitor it with Literal AI](https://github.com/Chainlit/literal-cookbook/blob/main/python/llamaindex-integration)
-
-![](../../_static/integrations/literal_ai.gif)
 
 ### Comet Opik
 
@@ -566,8 +564,6 @@ from langtrace_python_sdk import (
 langtrace.init(api_key="<LANGTRACE_API_KEY>")
 ```
 
-![](../../_static/integrations/langtrace.gif)
-
 #### Guides
 
 - [Langtrace](https://docs.langtrace.ai/supported-integrations/llm-frameworks/llamaindex)
@@ -589,8 +585,6 @@ import openlit
 
 openlit.init()
 ```
-
-![](../../_static/integrations/openlit.gif)
 
 #### Guides
 
