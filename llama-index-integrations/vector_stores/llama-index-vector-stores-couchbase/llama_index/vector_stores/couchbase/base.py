@@ -2,21 +2,22 @@
 Couchbase Vector store interface.
 """
 
-import logging
 from typing import Any, Dict, List, Optional
 
-from llama_index.core.bridge.pydantic import PrivateAttr
+import logging
+
 from llama_index.core.schema import BaseNode, MetadataMode, TextNode
 from llama_index.core.vector_stores.types import (
     BasePydanticVectorStore,
-    MetadataFilters,
     VectorStoreQuery,
     VectorStoreQueryResult,
+    MetadataFilters,
 )
 from llama_index.core.vector_stores.utils import (
-    metadata_dict_to_node,
     node_to_metadata_dict,
+    metadata_dict_to_node,
 )
+from llama_index.core.bridge.pydantic import PrivateAttr
 
 logger = logging.getLogger(__name__)
 
@@ -300,24 +301,7 @@ class CouchbaseVectorStore(BasePydanticVectorStore):
             logger.debug("Inserted batch of documents to Couchbase")
         return doc_ids
 
-    def delete(self, ref_doc_id: str, **kwargs: Any) -> None:
-        """
-        Delete a document by its reference document ID.
 
-        Args:
-            ref_doc_id: The reference document ID to be deleted.
-
-        Returns:
-            None
-        """
-        try:
-            document_field = self._metadata_key + ".ref_doc_id"
-            query = f"DELETE FROM `{self._collection_name}` WHERE {document_field} = $ref_doc_id"
-            self._scope.query(query, ref_doc_id=ref_doc_id).execute()
-            logger.debug(f"Deleted document {ref_doc_id}")
-        except Exception:
-            logger.error(f"Error deleting document {ref_doc_id}")
-            raise
 
     def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
         """
@@ -432,8 +416,7 @@ class CouchbaseVectorStore(BasePydanticVectorStore):
         return self._cluster
 
     def _check_bucket_exists(self) -> bool:
-        """
-        Check if the bucket exists in the linked Couchbase cluster.
+        """Check if the bucket exists in the linked Couchbase cluster.
 
         Returns:
             True if the bucket exists
@@ -447,8 +430,7 @@ class CouchbaseVectorStore(BasePydanticVectorStore):
             return False
 
     def _check_scope_and_collection_exists(self) -> bool:
-        """
-        Check if the scope and collection exists in the linked Couchbase bucket
+        """Check if the scope and collection exists in the linked Couchbase bucket
         Returns:
             True if the scope and collection exist in the bucket
             Raises a ValueError if either is not found.
@@ -480,8 +462,7 @@ class CouchbaseVectorStore(BasePydanticVectorStore):
         return True
 
     def _check_index_exists(self) -> bool:
-        """
-        Check if the Search index exists in the linked Couchbase cluster
+        """Check if the Search index exists in the linked Couchbase cluster
         Returns:
             bool: True if the index exists, False otherwise.
             Raises a ValueError if the index does not exist.
@@ -508,8 +489,7 @@ class CouchbaseVectorStore(BasePydanticVectorStore):
         return True
 
     def _format_metadata(self, row_fields: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Helper method to format the metadata from the Couchbase Search API.
+        """Helper method to format the metadata from the Couchbase Search API.
 
         Args:
             row_fields (Dict[str, Any]): The fields to format.
