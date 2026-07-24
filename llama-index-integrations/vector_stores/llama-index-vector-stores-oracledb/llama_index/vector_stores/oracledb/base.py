@@ -7,21 +7,19 @@ import json
 import logging
 import math
 import os
-import re
 import uuid
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
-    ClassVar,
     Dict,
     List,
     Optional,
-    Tuple,
     Type,
     TypeVar,
     cast,
+    ClassVar,
 )
 
 from llama_index.core.schema import (
@@ -43,6 +41,7 @@ if TYPE_CHECKING:
 
 from llama_index.core.vector_stores.utils import metadata_dict_to_node
 from pydantic import PrivateAttr
+
 
 logger = logging.getLogger(__name__)
 log_level = os.getenv("LOG_LEVEL", "ERROR").upper()
@@ -118,12 +117,17 @@ column_config: Dict = {
 }
 
 
+def _stringify_list(lst: List) -> str:
+    return "[" + ",".join(str(item) for item in lst) + "]"
+
+
 def _table_exists(connection: Connection, table_name: str) -> bool:
     try:
         import oracledb
     except ImportError as e:
         raise ImportError(
-            "Unable to import oracledb, please install with `pip install -U oracledb`."
+            "Unable to import oracledb, please install with "
+            "`pip install -U oracledb`."
         ) from e
     try:
         with connection.cursor() as cursor:
@@ -181,7 +185,7 @@ def _create_table(connection: Connection, table_name: str) -> None:
     if not _table_exists(connection, table_name):
         with connection.cursor() as cursor:
             column_definitions = ", ".join(
-                [f"{k} {v['type']}" for k, v in column_config.items()]
+                [f'{k} {v["type"]}' for k, v in column_config.items()]
             )
 
             # Generate the final DDL statement
@@ -373,8 +377,7 @@ def drop_index_if_exists(connection: Connection, index_name: str):
 
 
 class OraLlamaVS(BasePydanticVectorStore):
-    """
-    `OraLlamaVS` vector store.
+    """`OraLlamaVS` vector store.
 
     To use, you should have both:
     - the ``oracledb`` python package installed
@@ -457,32 +460,18 @@ class OraLlamaVS(BasePydanticVectorStore):
 
     def _append_meta_filter_condition(
         self, where_str: Optional[str], exact_match_filter: list
-    ) -> Tuple[str, list]:
-        bind_variables = []
-        filter_conditions = []
-
-        # Validate metadata keys (only allow alphanumeric and underscores)
-        for filter_item in exact_match_filter:
-            # Validate the key - only allow safe characters for JSON path
-            if not re.match(r"^[a-zA-Z0-9_]+$", filter_item.key):
-                raise ValueError(f"Invalid metadata key format: {filter_item.key}")
-            # Use JSON_VALUE with parameterized values
-            filter_conditions.append(
-                f"JSON_VALUE({self.metadata_column}, '$.{filter_item.key}') = :value{len(bind_variables)}"
-            )
-            bind_variables.append(filter_item.value)
-
-        # Convert filter conditions to a single string
-        filter_str = " AND ".join(filter_conditions)
-
+    ) -> str:
+        filter_str = " AND ".join(
+            f"JSON_VALUE({self.metadata_column}, '$.{filter_item.key}') = '{filter_item.value}'"
+            for filter_item in exact_match_filter
+        )
         if where_str is None:
             where_str = filter_str
         else:
             where_str += " AND " + filter_str
+        return where_str
 
-        return where_str, bind_variables
-
-    def _build_insert(self, values: List[BaseNode]) -> Tuple[str, List[tuple]]:
+    def _build_insert(self, values: List[BaseNode]) -> (str, List[tuple]):
         _data = []
         for item in values:
             item_values = tuple(
@@ -492,7 +481,7 @@ class OraLlamaVS(BasePydanticVectorStore):
 
         dml = f"""
            INSERT INTO {self.table_name} ({", ".join(column_config.keys())})
-           VALUES ({", ".join([":" + str(i + 1) for i in range(len(column_config))])})
+           VALUES ({", ".join([':' + str(i + 1) for i in range(len(column_config))])})
         """
         return dml, _data
 
@@ -583,17 +572,12 @@ class OraLlamaVS(BasePydanticVectorStore):
     @_handle_exceptions
     def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
         distance_function = _get_distance_function(self.distance_strategy)
-        where_str = None
-        params = {}
-        if query.doc_ids:
-            placeholders = ", ".join([f":doc_id{i}" for i in range(len(query.doc_ids))])
-            where_str = f"doc_id in ({placeholders})"
-            for i, doc_id in enumerate(query.doc_ids):
-                params[f"doc_id{i}"] = doc_id
+        where_str = (
+            f"doc_id in {_stringify_list(query.doc_ids)}" if query.doc_ids else None
+        )
 
-        bind_vars = []
         if query.filters is not None:
-            where_str, bind_vars = self._append_meta_filter_condition(
+            where_str = self._append_meta_filter_condition(
                 where_str, query.filters.filters
             )
 
@@ -621,11 +605,8 @@ class OraLlamaVS(BasePydanticVectorStore):
             logger.debug(f"hybrid query_statement={query_statement}")
         """
         embedding = array.array("f", query.query_embedding)
-        params = {"embedding": embedding}
-        for i, value in enumerate(bind_vars):
-            params[f"value{i}"] = value
         with self._client.cursor() as cursor:
-            cursor.execute(query_sql, **params)
+            cursor.execute(query_sql, embedding=embedding)
             results = cursor.fetchall()
 
             similarities = []
