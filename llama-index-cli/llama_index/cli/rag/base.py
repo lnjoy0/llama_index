@@ -1,6 +1,5 @@
 import asyncio
 import os
-import shlex
 import shutil
 from argparse import ArgumentParser
 from glob import iglob
@@ -15,8 +14,8 @@ from llama_index.core import (
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.base.response.schema import (
     RESPONSE_TYPE,
-    Response,
     StreamingResponse,
+    Response,
 )
 from llama_index.core.bridge.pydantic import BaseModel, Field, field_validator
 from llama_index.core.chat_engine import CondenseQuestionChatEngine
@@ -160,7 +159,7 @@ class RagCLI(BaseModel):
         if chat_engine is not None:
             return chat_engine
 
-        if values.get("query_pipeline") is None:
+        if values.get("query_pipeline", None) is None:
             values["query_pipeline"] = cls.query_pipeline_from_ingestion_pipeline(
                 query_pipeline=None, values=values
             )
@@ -232,8 +231,7 @@ class RagCLI(BaseModel):
 
             # Append the `--files` argument to the history file
             with open(f"{self.persist_dir}/{RAG_HISTORY_FILE_NAME}", "a") as f:
-                for file in files:
-                    f.write(str(file) + "\n")
+                f.write(str(files) + "\n")
 
         if create_llama:
             if shutil.which("npx") is None:
@@ -291,7 +289,7 @@ class RagCLI(BaseModel):
                                 "none",
                                 "--engine",
                                 "context",
-                                f"--files {shlex.quote(path)}",
+                                f"--files {path}",
                             ]
                             os.system(" ".join(command_args))
 
