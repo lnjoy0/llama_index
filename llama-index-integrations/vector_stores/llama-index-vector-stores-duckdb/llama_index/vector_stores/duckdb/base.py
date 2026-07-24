@@ -3,14 +3,13 @@
 import json
 import logging
 import os
-from typing import Any, List, Optional, cast
+from typing import Any, List, Optional
 
 from fsspec.utils import Sequence
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.schema import BaseNode, MetadataMode
 from llama_index.core.vector_stores.types import (
     BasePydanticVectorStore,
-    MetadataFilter,
     MetadataFilters,
     VectorStoreQuery,
     VectorStoreQueryResult,
@@ -20,7 +19,6 @@ from llama_index.core.vector_stores.utils import (
     node_to_metadata_dict,
 )
 
-import duckdb
 
 logger = logging.getLogger(__name__)
 import_err_msg = "`duckdb` package not found, please run `pip install duckdb`"
@@ -33,6 +31,11 @@ class DuckDBLocalContext:
         self._home_dir = os.path.expanduser("~")
 
     def __enter__(self) -> "duckdb.DuckDBPyConnection":
+        try:
+            import duckdb
+        except ImportError:
+            raise ImportError(import_err_msg)
+        
         if not os.path.exists(os.path.dirname(self.database_path)):
             raise ValueError(
                 f"Directory {os.path.dirname(self.database_path)} does not exist."
@@ -51,38 +54,20 @@ class DuckDBLocalContext:
         return self._conn
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self._conn.close()
+
         if self._conn:
             self._conn.close()
 
 
 class DuckDBVectorStore(BasePydanticVectorStore):
-    """
-    DuckDB vector store.
-
-    In this vector store, embeddings are stored within a DuckDB database.
-
-    During query time, the index uses DuckDB to query for the top
-    k most similar nodes.
-
-    Examples:
-        `pip install llama-index-vector-stores-duckdb`
-
-        ```python
-        from llama_index.vector_stores.duckdb import DuckDBVectorStore
-
-        # in-memory
-        vector_store = DuckDBVectorStore()
-
-        # persist to disk
-        vector_store = DuckDBVectorStore("pg.duckdb", persist_dir="./persist/")
-        ```
-    """
+    """DuckDB vector store."""
 
     stores_text: bool = True
     flat_metadata: bool = True
 
     database_name: Optional[str]
-    table_name: str
+    table_name: Optional[str]
     # schema_name: Optional[str] # TODO: support schema name
     embed_dim: Optional[int]
     # hybrid_search: Optional[bool] # TODO: support hybrid search
@@ -95,8 +80,9 @@ class DuckDBVectorStore(BasePydanticVectorStore):
 
     def __init__(
         self,
-        database_name: str = ":memory:",
-        table_name: str = "documents",
+        database_name: Optional[str] = ":memory:",
+        table_name: Optional[str] = "documents",
+        # schema_name: Optional[str] = "main",
         embed_dim: Optional[int] = None,
         # https://duckdb.org/docs/extensions/full_text_search
         text_search_config: Optional[dict] = {
@@ -107,7 +93,7 @@ class DuckDBVectorStore(BasePydanticVectorStore):
             "lower": True,
             "overwrite": False,
         },
-        persist_dir: str = "./storage",
+        persist_dir: Optional[str] = "./storage",
         **kwargs: Any,
     ) -> None:
         """Init params."""
@@ -137,14 +123,15 @@ class DuckDBVectorStore(BasePydanticVectorStore):
 
             conn = None
 
-        fields = {
-            "database_name": database_name,
-            "table_name": table_name,
-            "embed_dim": embed_dim,
-            "text_search_config": text_search_config,
-            "persist_dir": persist_dir,
-        }
-        super().__init__(stores_text=True, **fields)
+        super().__init__(
+            database_name=database_name,
+            table_name=table_name,
+            # schema_name=schema_name,
+            embed_dim=embed_dim,
+            # hybrid_search=hybrid_search,
+            text_search_config=text_search_config,
+            persist_dir=persist_dir,
+        )
         self._is_initialized = False
         self._conn = conn
         self._database_path = database_path
@@ -153,7 +140,7 @@ class DuckDBVectorStore(BasePydanticVectorStore):
     def from_local(
         cls,
         database_path: str,
-        table_name: str = "documents",
+        table_name: Optional[str] = "documents",
         # schema_name: Optional[str] = "main",
         embed_dim: Optional[int] = None,
         # hybrid_search: Optional[bool] = False,
@@ -197,8 +184,8 @@ class DuckDBVectorStore(BasePydanticVectorStore):
     @classmethod
     def from_params(
         cls,
-        database_name: str = ":memory:",
-        table_name: str = "documents",
+        database_name: Optional[str] = ":memory:",
+        table_name: Optional[str] = "documents",
         # schema_name: Optional[str] = "main",
         embed_dim: Optional[int] = None,
         # hybrid_search: Optional[bool] = False,
@@ -210,7 +197,7 @@ class DuckDBVectorStore(BasePydanticVectorStore):
             "lower": True,
             "overwrite": False,
         },
-        persist_dir: str = "./storage",
+        persist_dir: Optional[str] = "./storage",
         **kwargs: Any,
     ) -> "DuckDBVectorStore":
         return cls(
@@ -259,7 +246,7 @@ class DuckDBVectorStore(BasePydanticVectorStore):
 
             if self.database_name == ":memory:":
                 self._conn.execute(_query)
-            elif self._database_path is not None:
+            else:
                 with DuckDBLocalContext(self._database_path) as _conn:
                     _conn.execute(_query)
 
@@ -280,9 +267,8 @@ class DuckDBVectorStore(BasePydanticVectorStore):
     def _table_row_to_node(self, row: Any) -> BaseNode:
         return metadata_dict_to_node(json.loads(row[3]), row[1])
 
-    def add(self, nodes: Sequence[BaseNode], **add_kwargs: Any) -> List[str]:
-        """
-        Add nodes to index.
+    def add(self, nodes: List[BaseNode], **add_kwargs: Any) -> List[str]:
+        """Add nodes to index.
 
         Args:
             nodes: List[BaseNode]: list of nodes with embeddings
@@ -298,7 +284,7 @@ class DuckDBVectorStore(BasePydanticVectorStore):
                 ids.append(node.node_id)
                 _row = self._node_to_table_row(node)
                 _table.insert(_row)
-        elif self._database_path is not None:
+        else:
             with DuckDBLocalContext(self._database_path) as _conn:
                 _table = _conn.table(self.table_name)
                 for node in nodes:
@@ -318,18 +304,18 @@ class DuckDBVectorStore(BasePydanticVectorStore):
         """
         _ddb_query = f"""
             DELETE FROM {self.table_name}
-            WHERE json_extract_string(metadata_, '$.ref_doc_id') = ?;
+            WHERE json_extract_string(metadata_, '$.ref_doc_id') = '{ref_doc_id}';
             """
         if self.database_name == ":memory:":
-            self._conn.execute(_ddb_query, [ref_doc_id])
-        elif self._database_path is not None:
+            self._conn.execute(_ddb_query)
+        else:
             with DuckDBLocalContext(self._database_path) as _conn:
-                _conn.execute(_ddb_query, [ref_doc_id])
+                _conn.execute(_ddb_query)
 
     @staticmethod
     def _build_metadata_filter_condition(
         standard_filters: MetadataFilters,
-    ) -> str:
+    ) -> dict:
         """Translate standard metadata filters to DuckDB SQL specification."""
         filters_list = []
         # condition = standard_filters.condition or "and"  ## and/or as strings.
@@ -337,7 +323,6 @@ class DuckDBVectorStore(BasePydanticVectorStore):
         _filters_condition_list = []
 
         for filter in standard_filters.filters:
-            filter = cast(MetadataFilter, filter)
             if filter.operator:
                 if filter.operator in [
                     "<",
@@ -388,39 +373,29 @@ class DuckDBVectorStore(BasePydanticVectorStore):
             _ddb_query = f"""
             SELECT node_id, text, embedding, metadata_, score
             FROM (
-                SELECT *, list_cosine_similarity(embedding, ?) AS score
+                SELECT *, list_cosine_similarity(embedding, {query.query_embedding}) AS score
                 FROM {self.table_name}
-                WHERE ?
+                WHERE {_filter_string}
             ) sq
             WHERE score IS NOT NULL
-            ORDER BY score DESC LIMIT ?;
+            ORDER BY score DESC LIMIT {query.similarity_top_k};
             """
-            query_params = [
-                query.query_embedding,
-                _filter_string,
-                query.similarity_top_k,
-            ]
         else:
             _ddb_query = f"""
-            SELECT node_id, text, embedding, metadata_, score
+            SELECT *, list_cosine_similarity(embedding, {query.query_embedding}) AS score
             FROM (
                 SELECT *, list_cosine_similarity(embedding, ?) AS score
                 FROM {self.table_name}
             ) sq
             WHERE score IS NOT NULL
-            ORDER BY score DESC LIMIT ?;
+            ORDER BY score DESC LIMIT {query.similarity_top_k};
             """
-            query_params = [
-                query.query_embedding,
-                query.similarity_top_k,
-            ]
 
-        _final_results = []
         if self.database_name == ":memory:":
-            _final_results = self._conn.execute(_ddb_query, query_params).fetchall()
-        elif self._database_path is not None:
+            _final_results = self._conn.execute(_ddb_query).fetchall()
+        else:
             with DuckDBLocalContext(self._database_path) as _conn:
-                _final_results = _conn.execute(_ddb_query, query_params).fetchall()
+                _final_results = _conn.execute(_ddb_query).fetchall()
 
         for _row in _final_results:
             node = self._table_row_to_node(_row)
