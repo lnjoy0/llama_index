@@ -1,4 +1,5 @@
-""" Jaguar Vector Store.
+"""
+Jaguar Vector Store.
 
 . A distributed vector database
 . The ZeroMove feature enables instant horizontal scalability
@@ -14,10 +15,9 @@
 import datetime
 import json
 import logging
-from typing import Any, List, Optional, Tuple, Union, cast
+from typing import Any, List, Optional, Sequence, Tuple, Union, cast
 
 from jaguardb_http_client.JaguarHttpClient import JaguarHttpClient
-
 from llama_index.core.bridge.pydantic import PrivateAttr
 from llama_index.core.schema import BaseNode, Document, TextNode
 from llama_index.core.vector_stores.types import (
@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 class JaguarVectorStore(BasePydanticVectorStore):
-    """Jaguar vector store.
+    """
+    Jaguar vector store.
 
     See http://www.jaguardb.com
     See http://github.com/fserv/jaguar-sdk
@@ -61,6 +62,34 @@ class JaguarVectorStore(BasePydanticVectorStore):
     _jag: JaguarHttpClient = PrivateAttr()
     _token: str = PrivateAttr()
 
+    def __init__(
+        self,
+        pod: str,
+        store: str,
+        vector_index: str,
+        vector_type: str,
+        vector_dimension: int,
+        url: str,
+    ):
+        """
+        Constructor of JaguarVectorStore.
+
+        Args:
+            pod: str:  name of the pod (database)
+            store: str:  name of vector store in the pod
+            vector_index: str:  name of vector index of the store
+            vector_type: str:  type of the vector index
+            vector_dimension: int:  dimension of the vector index
+            url: str:  URL end point of jaguar http server
+        """
+        super().__init__(stores_text=True)
+        self._pod = self._sanitize_input(pod)
+        self._store = self._sanitize_input(store)
+        self._vector_index = self._sanitize_input(vector_index)
+        self._vector_type = self._sanitize_input(vector_type)
+        self._vector_dimension = vector_dimension
+        self._jag = JaguarHttpClient(url)
+        self._token = ""
 
     def __del__(self) -> None:
         pass
@@ -74,12 +103,21 @@ class JaguarVectorStore(BasePydanticVectorStore):
         """Get client."""
         return self._jag
 
+    def _sanitize_input(self, value: str) -> str:
+        """Sanitize input to prevent SQL injection."""
+        forbidden_chars = ['"', ";", "--", "/*", "*/"]
+        sanitized = value.replace("'", "\\'")
+        for char in forbidden_chars:
+            sanitized = sanitized.replace(char, "")
+        return sanitized
+
     def add(
         self,
-        nodes: List[BaseNode],
+        nodes: Sequence[BaseNode],
         **add_kwargs: Any,
     ) -> List[str]:
-        """Add nodes to index.
+        """
+        Add nodes to index.
 
         Args:
             nodes: List[BaseNode]: list of nodes with embeddings
@@ -98,9 +136,26 @@ class JaguarVectorStore(BasePydanticVectorStore):
 
         return ids
 
+    def delete(self, ref_doc_id: str, **delete_kwargs: Any) -> None:
+        """
+        Delete nodes using with ref_doc_id.
+
+        Args:
+            ref_doc_id (str): The doc_id of the document to delete.
+        """
+        podstore = self._pod + "." + self._store
+        q = (
+            "delete from "
+            + podstore
+            + " where zid='"
+            + self._sanitize_input(ref_doc_id)
+            + "'"
+        )
+        self.run(q)
 
     def query(self, query: VectorStoreQuery, **kwargs: Any) -> VectorStoreQueryResult:
-        """Query index for top k most similar nodes.
+        """
+        Query index for top k most similar nodes.
 
         Args:
             query: VectorStoreQuery object
@@ -116,7 +171,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
     def load_documents(
         self, embedding: List[float], k: int, **kwargs: Any
     ) -> List[Document]:
-        """Query index to load top k most similar documents.
+        """
+        Query index to load top k most similar documents.
 
         Args:
             embedding: a list of floats
@@ -128,14 +184,225 @@ class JaguarVectorStore(BasePydanticVectorStore):
             self.similarity_search_with_score(embedding, k=k, form="doc", **kwargs),
         )
 
+    def create(
+        self,
+        metadata_fields: str,
+        text_size: int,
+    ) -> None:
+        """
+        Create the vector store on the backend database.
 
+        Args:
+            metadata_fields (str):  exrta metadata columns and types
+        Returns:
+            True if successful; False if not successful
+        """
+        podstore = self._pod + "." + self._store
+
+        """
+        v:text column is required.
+        """
+        q = "create store "
+        q += podstore
+        q += f" ({self._vector_index} vector({self._vector_dimension},"
+        q += f" '{self._vector_type}'),"
+        q += f"  v:text char({text_size}),"
+        q += self._sanitize_input(metadata_fields) + ")"
+        self.run(q)
+
+    def add_text(
+        self,
+        text: str,
+        embedding: List[float],
+        metadata: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Add  texts through the embeddings and add to the vectorstore.
+
+        Args:
+          texts: text string to add to the jaguar vector store.
+          embedding: embedding vector of the text, list of floats
+          metadata: {'file_path': '../data/paul_graham/paul_graham_essay.txt',
+                          'file_name': 'paul_graham_essay.txt',
+                          'file_type': 'text/plain',
+                          'file_size': 75042,
+                          'creation_date': '2023-12-24',
+                          'last_modified_date': '2023-12-24',
+                          'last_accessed_date': '2023-12-28'}
+          kwargs: vector_index=name_of_vector_index
+                  file_column=name_of_file_column
+                  metadata={...}
+
+        Returns:
+            id from adding the text into the vectorstore
+        """
+        text = self._sanitize_input(text)
+        vcol = self._vector_index
+        filecol = kwargs.get("file_column", "")
+        text_tag = kwargs.get("text_tag", "")
+
+        if text_tag != "":
+            text = text_tag + " " + text
+
+        podstorevcol = self._pod + "." + self._store + "." + vcol
+        q = "textcol " + podstorevcol
+        js = self.run(q)
+        if js == "":
+            return ""
+        textcol = js["data"]
+
+        zid = ""
+        if metadata is None:
+            ### no metadata and no files to upload
+            str_vec = [str(x) for x in embedding]
+            values_comma = self._sanitize_input(",".join(str_vec))
+            podstore = self._pod + "." + self._store
+            q = "insert into " + podstore + " ("
+            q += vcol + "," + textcol + ") values ('" + values_comma
+            q += "','" + text + "')"
+            js = self.run(q, False)
+            zid = js["zid"]
+        else:
+            str_vec = [str(x) for x in embedding]
+            nvec, vvec, filepath = self._parseMeta(metadata, filecol)
+            if filecol != "":
+                rc = self._jag.postFile(self._token, filepath, 1)
+                if not rc:
+                    return ""
+            names_comma = ",".join(nvec)
+            names_comma += "," + vcol
+            names_comma = self._sanitize_input(names_comma)
+            ## col1,col2,col3,vecl
+
+            if vvec is not None and len(vvec) > 0:
+                values_comma = "'" + "','".join(vvec) + "'"
+            else:
+                values_comma = "'" + "','".join(vvec) + "'"
+
+            ### 'va1','val2','val3'
+            values_comma += ",'" + ",".join(str_vec) + "'"
+            values_comma = self._sanitize_input(values_comma)
+            ### 'v1,v2,v3'
+            podstore = self._pod + "." + self._store
+            q = "insert into " + podstore + " ("
+            q += names_comma + "," + textcol + ") values (" + values_comma
+            q += ",'" + text + "')"
+            if filecol != "":
+                js = self.run(q, True)
+            else:
+                js = self.run(q, False)
+            zid = js["zid"]
+
+        return zid
+
+    def similarity_search_with_score(
+        self,
+        embedding: Optional[List[float]],
+        k: int = 3,
+        form: str = "node",
+        **kwargs: Any,
+    ) -> Union[Tuple[List[TextNode], List[str], List[float]], List[Document]]:
+        """
+        Return nodes most similar to query embedding, along with ids and scores.
+
+        Args:
+            embedding: embedding of text to look up.
+            k: Number of nodes to return. Defaults to 3.
+            form: if "node", return Tuple[List[TextNode], List[str], List[float]]
+                  if "doc", return List[Document]
+            kwargs: may have where, metadata_fields, args, fetch_k
+        Returns:
+            Tuple(list of nodes, list of ids, list of similaity scores)
+        """
+        where = kwargs.get("where")
+        metadata_fields = kwargs.get("metadata_fields")
+
+        args = kwargs.get("args")
+        fetch_k = kwargs.get("fetch_k", -1)
+
+        vcol = self._vector_index
+        vtype = self._vector_type
+        if embedding is None:
+            return ([], [], [])
+        str_embeddings = [str(f) for f in embedding]
+        qv_comma = self._sanitize_input(",".join(str_embeddings))
+        podstore = self._pod + "." + self._store
+        q = (
+            "select similarity("
+            + vcol
+            + ",'"
+            + qv_comma
+            + "','topk="
+            + str(k)
+            + ",fetch_k="
+            + str(fetch_k)
+            + ",type="
+            + vtype
+        )
+        q += ",with_score=yes,with_text=yes"
+        if args is not None:
+            q += "," + args
+
+        if metadata_fields is not None:
+            x = "&".join(metadata_fields)
+            q += ",metadata=" + x
+
+        q += "') from " + podstore
+
+        if where is not None:
+            q += " where " + self._sanitize_input(where)
+
+        jarr = self.run(q)
+
+        if jarr is None:
+            return ([], [], [])
+
+        nodes = []
+        ids = []
+        simscores = []
+        docs = []
+        for js in jarr:
+            score = js["score"]
+            text = js["text"]
+            zid = js["zid"]
+
+            md = {}
+            md["zid"] = zid
+            if metadata_fields is not None:
+                for m in metadata_fields:
+                    mv = js[m]
+                    md[m] = mv
+
+            if form == "node":
+                node = TextNode(
+                    id_=zid,
+                    text=text,
+                    metadata=md,
+                )
+                nodes.append(node)
+                ids.append(zid)
+                simscores.append(float(score))
+            else:
+                doc = Document(
+                    id_=zid,
+                    text=text,
+                    metadata=md,
+                )
+                docs.append(doc)
+
+        if form == "node":
+            return (nodes, ids, simscores)
+        else:
+            return docs
 
     def is_anomalous(
         self,
         node: BaseNode,
         **kwargs: Any,
     ) -> bool:
-        """Detect if given text is anomalous from the dataset.
+        """
+        Detect if given text is anomalous from the dataset.
 
         Args:
             query: Text to detect if it is anomaly
@@ -159,7 +426,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
         return False
 
     def run(self, query: str, withFile: bool = False) -> dict:
-        """Run any query statement in jaguardb.
+        """
+        Run any query statement in jaguardb.
 
         Args:
             query (str): query statement to jaguardb
@@ -179,7 +447,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
             return {}
 
     def count(self) -> int:
-        """Count records of a store in jaguardb.
+        """
+        Count records of a store in jaguardb.
 
         Args: no args
         Returns: (int) number of records in pod store
@@ -193,7 +462,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
         return int(jd["data"])
 
     def clear(self) -> None:
-        """Delete all records in jaguardb.
+        """
+        Delete all records in jaguardb.
 
         Args: No args
         Returns: None
@@ -203,7 +473,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
         self.run(q)
 
     def drop(self) -> None:
-        """Drop or remove a store in jaguardb.
+        """
+        Drop or remove a store in jaguardb.
 
         Args: no args
         Returns: None
@@ -221,7 +492,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
         self,
         jaguar_api_key: Optional[str] = "",
     ) -> bool:
-        """Login to jaguar server with a jaguar_api_key or let self._jag find a key.
+        """
+        Login to jaguar server with a jaguar_api_key or let self._jag find a key.
 
         Args:
             optional jaguar_api_key (str): API key of user to jaguardb server
@@ -238,7 +510,8 @@ class JaguarVectorStore(BasePydanticVectorStore):
         return True
 
     def logout(self) -> None:
-        """Logout to cleanup resources.
+        """
+        Logout to cleanup resources.
 
         Args: no args
         Returns: None
