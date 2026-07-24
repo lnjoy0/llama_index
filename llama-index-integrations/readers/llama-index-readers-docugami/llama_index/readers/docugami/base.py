@@ -159,6 +159,28 @@ class DocugamiReader(BaseReader):
                 else None
             )
 
+        def _build_framework_chunk(dg_chunk: Chunk) -> Document:
+            # Adding dg_chunk.text + dg_chunk.xpath should prevent hash collision between two chunks that have the same text but a different xpath
+            text = dg_chunk.xpath + "\n" + dg_chunk.text
+            _hashed_id = hashlib.md5(text.encode()).hexdigest()
+            metadata = {
+                XPATH_KEY: dg_chunk.xpath,
+                ID_KEY: _hashed_id,
+                DOCUMENT_NAME_KEY: document_name,
+                STRUCTURE_KEY: dg_chunk.structure,
+                TAG_KEY: dg_chunk.tag,
+            }
+
+            text = dg_chunk.text
+            if additional_doc_metadata:
+                if self.include_project_metadata_in_doc_metadata:
+                    metadata.update(additional_doc_metadata)
+
+            return Document(
+                text=text[: self.max_text_length],
+                metadata=metadata,
+                excluded_llm_metadata_keys=[XPATH_KEY, ID_KEY, STRUCTURE_KEY],
+            )
 
         # Parse the tree and return chunks
         tree = etree.parse(io.BytesIO(content))
