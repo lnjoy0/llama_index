@@ -1,6 +1,7 @@
 import functools
 import httpx
 import tiktoken
+import base64
 from openai import AsyncOpenAI, AzureOpenAI
 from openai import OpenAI as SyncOpenAI
 from openai.types.responses import (
@@ -13,7 +14,7 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseInProgressEvent,
     ResponseOutputItemAddedEvent,
-    ResponseTextAnnotationDeltaEvent,
+    ResponseOutputTextAnnotationAddedEvent,
     ResponseTextDeltaEvent,
     ResponseWebSearchCallCompletedEvent,
     ResponseOutputItem,
@@ -23,7 +24,10 @@ from openai.types.responses import (
     ResponseFunctionWebSearch,
     ResponseComputerToolCall,
     ResponseReasoningItem,
+    ResponseCodeInterpreterToolCall,
+    ResponseImageGenCallPartialImageEvent,
 )
+from openai.types.responses.response_output_item import ImageGenerationCall, McpCall
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -32,7 +36,6 @@ from typing import (
     Dict,
     Generator,
     List,
-    Literal,
     Optional,
     Protocol,
     Sequence,
@@ -59,7 +62,9 @@ from llama_index.core.base.llms.types import (
     CompletionResponseGen,
     LLMMetadata,
     MessageRole,
+    ContentBlock,
     TextBlock,
+    ImageBlock,
 )
 from llama_index.core.bridge.pydantic import (
     Field,
@@ -137,6 +142,9 @@ class OpenAIResponses(FunctionCallingLLM):
         model: name of the OpenAI model to use.
         temperature: a float from 0 to 1 controlling randomness in generation; higher will lead to more creative, less deterministic responses.
         max_output_tokens: the maximum number of tokens to generate.
+        reasoning_options: Optional dictionary to configure reasoning for O1 models.
+                    Corresponds to the 'reasoning' parameter in the OpenAI API.
+                    Example: {"effort": "low", "summary": "concise"}
         include: Additional output data to include in the model response.
         instructions: Instructions for the model to follow.
         track_previous_responses: Whether to track previous responses. If true, the LLM class will statefully track previous responses.
@@ -186,6 +194,10 @@ class OpenAIResponses(FunctionCallingLLM):
     max_output_tokens: Optional[int] = Field(
         description="The maximum number of tokens to generate.",
         gt=0,
+    )
+    reasoning_options: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional dictionary to configure reasoning for O1 models. Example: {'effort': 'low', 'summary': 'concise'}",
     )
     include: Optional[List[str]] = Field(
         default=None,
@@ -243,9 +255,9 @@ class OpenAIResponses(FunctionCallingLLM):
     api_key: str = Field(default=None, description="The OpenAI API key.")
     api_base: str = Field(description="The base URL for OpenAI API.")
     api_version: str = Field(description="The API version for OpenAI API.")
-    reasoning_effort: Optional[Literal["low", "medium", "high"]] = Field(
+    context_window: Optional[int] = Field(
         default=None,
-        description="The effort to use for reasoning models.",
+        description="The context window override for the model.",
     )
 
     _client: SyncOpenAI = PrivateAttr()
@@ -259,7 +271,7 @@ class OpenAIResponses(FunctionCallingLLM):
         model: str = DEFAULT_OPENAI_MODEL,
         temperature: float = DEFAULT_TEMPERATURE,
         max_output_tokens: Optional[int] = None,
-        reasoning_effort: Optional[Literal["low", "medium", "high"]] = None,
+        reasoning_options: Optional[Dict[str, Any]] = None,
         include: Optional[List[str]] = None,
         instructions: Optional[str] = None,
         track_previous_responses: bool = False,
@@ -281,6 +293,7 @@ class OpenAIResponses(FunctionCallingLLM):
         async_http_client: Optional[httpx.AsyncClient] = None,
         openai_client: Optional[SyncOpenAI] = None,
         async_openai_client: Optional[AsyncOpenAI] = None,
+        context_window: Optional[int] = None,
         **kwargs: Any,
     ) -> None:
         additional_kwargs = additional_kwargs or {}
@@ -299,7 +312,7 @@ class OpenAIResponses(FunctionCallingLLM):
             model=model,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
-            reasoning_effort=reasoning_effort,
+            reasoning_options=reasoning_options,
             include=include,
             instructions=instructions,
             track_previous_responses=track_previous_responses,
@@ -316,6 +329,7 @@ class OpenAIResponses(FunctionCallingLLM):
             default_headers=default_headers,
             call_metadata=call_metadata,
             strict=strict,
+            context_window=context_window,
             **kwargs,
         )
 
@@ -339,7 +353,8 @@ class OpenAIResponses(FunctionCallingLLM):
     @property
     def metadata(self) -> LLMMetadata:
         return LLMMetadata(
-            context_window=openai_modelname_to_contextsize(self._get_model_name()),
+            context_window=self.context_window
+            or openai_modelname_to_contextsize(self._get_model_name()),
             num_output=self.max_output_tokens or -1,
             is_chat_model=True,
             is_function_calling_model=is_function_calling_model(
@@ -380,6 +395,7 @@ class OpenAIResponses(FunctionCallingLLM):
         }
 
     def _get_model_kwargs(self, **kwargs: Any) -> Dict[str, Any]:
+        initial_tools = self.built_in_tools or []
         model_kwargs = {
             "model": self.model,
             "include": self.include,
@@ -389,22 +405,14 @@ class OpenAIResponses(FunctionCallingLLM):
             "previous_response_id": self._previous_response_id,
             "store": self.store,
             "temperature": self.temperature,
-            "tools": self.built_in_tools,
+            "tools": [*initial_tools, *kwargs.pop("tools", [])],
             "top_p": self.top_p,
             "truncation": self.truncation,
             "user": self.user,
         }
 
-        if self.model in O1_MODELS and self.reasoning_effort is not None:
-            # O1 models support reasoning_effort of low, medium, high
-            model_kwargs["reasoning_effort"] = {"effort": self.reasoning_effort}
-
-        # add tools or extend openai tools
-        if "tools" in kwargs:
-            if isinstance(model_kwargs["tools"], list):
-                model_kwargs["tools"].extend(kwargs.pop("tools"))
-            else:
-                model_kwargs["tools"] = kwargs.pop("tools")
+        if self.model in O1_MODELS and self.reasoning_options is not None:
+            model_kwargs["reasoning"] = self.reasoning_options
 
         # priority is class args > additional_kwargs > runtime args
         model_kwargs.update(self.additional_kwargs)
@@ -444,9 +452,9 @@ class OpenAIResponses(FunctionCallingLLM):
         message = ChatMessage(role=MessageRole.ASSISTANT, blocks=[])
         additional_kwargs = {"built_in_tool_calls": []}
         tool_calls = []
+        blocks: List[ContentBlock] = []
         for item in output:
             if isinstance(item, ResponseOutputMessage):
-                blocks = []
                 for part in item.content:
                     if hasattr(part, "text"):
                         blocks.append(TextBlock(text=part.text))
@@ -456,6 +464,17 @@ class OpenAIResponses(FunctionCallingLLM):
                         additional_kwargs["refusal"] = part.refusal
 
                 message.blocks.extend(blocks)
+            elif isinstance(item, ImageGenerationCall):
+                # return an ImageBlock if there is image generation
+                if item.status != "failed":
+                    additional_kwargs["built_in_tool_calls"].append(item)
+                    if item.result is not None:
+                        image_bytes = base64.b64decode(item.result)
+                        blocks.append(ImageBlock(image=image_bytes))
+            elif isinstance(item, ResponseCodeInterpreterToolCall):
+                additional_kwargs["built_in_tool_calls"].append(item)
+            elif isinstance(item, McpCall):
+                additional_kwargs["built_in_tool_calls"].append(item)
             elif isinstance(item, ResponseFileSearchToolCall):
                 additional_kwargs["built_in_tool_calls"].append(item)
             elif isinstance(item, ResponseFunctionToolCall):
@@ -474,6 +493,7 @@ class OpenAIResponses(FunctionCallingLLM):
 
     @llm_retry_decorator
     def _chat(self, messages: Sequence[ChatMessage], **kwargs: Any) -> ChatResponse:
+        kwargs_dict = self._get_model_kwargs(**kwargs)
         message_dicts = to_openai_message_dicts(
             messages,
             model=self.model,
@@ -483,7 +503,7 @@ class OpenAIResponses(FunctionCallingLLM):
         response: Response = self._client.responses.create(
             input=message_dicts,
             stream=False,
-            **self._get_model_kwargs(**kwargs),
+            **kwargs_dict,
         )
 
         if self.track_previous_responses:
@@ -498,7 +518,6 @@ class OpenAIResponses(FunctionCallingLLM):
     @staticmethod
     def process_response_event(
         event: ResponseStreamEvent,
-        content: str,
         tool_calls: List[ResponseFunctionToolCall],
         built_in_tool_calls: List[Any],
         additional_kwargs: Dict[str, Any],
@@ -506,7 +525,7 @@ class OpenAIResponses(FunctionCallingLLM):
         track_previous_responses: bool,
         previous_response_id: Optional[str] = None,
     ) -> Tuple[
-        str,
+        List[ContentBlock],
         List[ResponseFunctionToolCall],
         List[Any],
         Dict[str, Any],
@@ -533,7 +552,8 @@ class OpenAIResponses(FunctionCallingLLM):
         """
         delta = ""
         updated_previous_response_id = previous_response_id
-
+        # we use blocks instead of content, since now we also support images! :)
+        blocks: List[ContentBlock] = []
         if isinstance(event, ResponseCreatedEvent) or isinstance(
             event, ResponseInProgressEvent
         ):
@@ -547,7 +567,16 @@ class OpenAIResponses(FunctionCallingLLM):
         elif isinstance(event, ResponseTextDeltaEvent):
             # Text content is being added
             delta = event.delta
-            content += delta
+            blocks.append(TextBlock(text=delta))
+        elif isinstance(event, ResponseImageGenCallPartialImageEvent):
+            # Partial image
+            if event.partial_image_b64:
+                blocks.append(
+                    ImageBlock(
+                        image=base64.b64decode(event.partial_image_b64),
+                        detail=f"id_{event.partial_image_index}",
+                    )
+                )
         elif isinstance(event, ResponseFunctionCallArgumentsDeltaEvent):
             # Function call arguments are being streamed
             if current_tool_call is not None:
@@ -565,7 +594,7 @@ class OpenAIResponses(FunctionCallingLLM):
 
                 # clear the current tool call
                 current_tool_call = None
-        elif isinstance(event, ResponseTextAnnotationDeltaEvent):
+        elif isinstance(event, ResponseOutputTextAnnotationAddedEvent):
             # Annotations for the text
             annotations = additional_kwargs.get("annotations", [])
             annotations.append(event.annotation)
@@ -585,7 +614,7 @@ class OpenAIResponses(FunctionCallingLLM):
                 additional_kwargs["usage"] = event.response.usage
 
         return (
-            content,
+            blocks,
             tool_calls,
             built_in_tool_calls,
             additional_kwargs,
@@ -605,7 +634,6 @@ class OpenAIResponses(FunctionCallingLLM):
         )
 
         def gen() -> ChatResponseGen:
-            content = ""
             tool_calls = []
             built_in_tool_calls = []
             additional_kwargs = {"built_in_tool_calls": []}
@@ -619,7 +647,7 @@ class OpenAIResponses(FunctionCallingLLM):
             ):
                 # Process the event and update state
                 (
-                    content,
+                    blocks,
                     tool_calls,
                     built_in_tool_calls,
                     additional_kwargs,
@@ -628,7 +656,6 @@ class OpenAIResponses(FunctionCallingLLM):
                     delta,
                 ) = OpenAIResponses.process_response_event(
                     event=event,
-                    content=content,
                     tool_calls=tool_calls,
                     built_in_tool_calls=built_in_tool_calls,
                     additional_kwargs=additional_kwargs,
@@ -650,7 +677,7 @@ class OpenAIResponses(FunctionCallingLLM):
                 yield ChatResponse(
                     message=ChatMessage(
                         role=MessageRole.ASSISTANT,
-                        content=content,
+                        blocks=blocks,
                         additional_kwargs={"tool_calls": tool_calls}
                         if tool_calls
                         else {},
@@ -731,7 +758,6 @@ class OpenAIResponses(FunctionCallingLLM):
         )
 
         async def gen() -> ChatResponseAsyncGen:
-            content = ""
             tool_calls = []
             built_in_tool_calls = []
             additional_kwargs = {"built_in_tool_calls": []}
@@ -747,7 +773,7 @@ class OpenAIResponses(FunctionCallingLLM):
             async for event in response_stream:
                 # Process the event and update state
                 (
-                    content,
+                    blocks,
                     tool_calls,
                     built_in_tool_calls,
                     additional_kwargs,
@@ -756,7 +782,6 @@ class OpenAIResponses(FunctionCallingLLM):
                     delta,
                 ) = OpenAIResponses.process_response_event(
                     event=event,
-                    content=content,
                     tool_calls=tool_calls,
                     built_in_tool_calls=built_in_tool_calls,
                     additional_kwargs=additional_kwargs,
@@ -778,7 +803,7 @@ class OpenAIResponses(FunctionCallingLLM):
                 yield ChatResponse(
                     message=ChatMessage(
                         role=MessageRole.ASSISTANT,
-                        content=content,
+                        blocks=blocks,
                         additional_kwargs={"tool_calls": tool_calls}
                         if tool_calls
                         else {},
@@ -796,7 +821,8 @@ class OpenAIResponses(FunctionCallingLLM):
         user_msg: Optional[Union[str, ChatMessage]] = None,
         chat_history: Optional[List[ChatMessage]] = None,
         allow_parallel_tool_calls: bool = True,
-        tool_choice: Union[str, dict] = "auto",
+        tool_required: bool = False,
+        tool_choice: Optional[Union[str, dict]] = None,
         verbose: bool = False,
         strict: Optional[bool] = None,
         **kwargs: Any,
@@ -829,7 +855,9 @@ class OpenAIResponses(FunctionCallingLLM):
         return {
             "messages": messages,
             "tools": tool_specs or None,
-            "tool_choice": resolve_tool_choice(tool_choice) if tool_specs else None,
+            "tool_choice": resolve_tool_choice(tool_choice, tool_required)
+            if tool_specs
+            else None,
             "parallel_tool_calls": allow_parallel_tool_calls,
             **kwargs,
         }
@@ -841,9 +869,9 @@ class OpenAIResponses(FunctionCallingLLM):
         **kwargs: Any,
     ) -> List[ToolSelection]:
         """Predict and call the tool."""
-        tool_calls: List[
-            ResponseFunctionToolCall
-        ] = response.message.additional_kwargs.get("tool_calls", [])
+        tool_calls: List[ResponseFunctionToolCall] = (
+            response.message.additional_kwargs.get("tool_calls", [])
+        )
 
         if len(tool_calls) < 1:
             if error_on_no_tool_call:

@@ -1,4 +1,5 @@
 import functools
+from json.decoder import JSONDecodeError
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -77,7 +78,7 @@ from llama_index.llms.openai.utils import (
     to_openai_message_dicts,
     update_tool_calls,
 )
-from openai import AsyncOpenAI, AzureOpenAI
+from openai import AsyncOpenAI, AzureOpenAI, AsyncAzureOpenAI
 from openai import OpenAI as SyncOpenAI
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -178,6 +179,7 @@ class OpenAI(FunctionCallingLLM):
     )
     max_tokens: Optional[int] = Field(
         description="The maximum number of tokens to generate.",
+        default=None,
         gt=0,
     )
     logprobs: Optional[bool] = Field(
@@ -214,9 +216,13 @@ class OpenAI(FunctionCallingLLM):
         ),
     )
 
-    api_key: str = Field(default=None, description="The OpenAI API key.")
-    api_base: str = Field(description="The base URL for OpenAI API.")
-    api_version: str = Field(description="The API version for OpenAI API.")
+    api_key: Optional[str] = Field(default=None, description="The OpenAI API key.")
+    api_base: Optional[str] = Field(
+        default=None, description="The base URL for OpenAI API."
+    )
+    api_version: Optional[str] = Field(
+        default=None, description="The API version for OpenAI API."
+    )
     strict: bool = Field(
         default=False,
         description="Whether to use strict mode for invoking tools/using schemas.",
@@ -339,9 +345,6 @@ class OpenAI(FunctionCallingLLM):
         elif model_name.startswith("ft:"):
             model_name = model_name.split(":")[1]
         return model_name
-
-    def _is_azure_client(self) -> bool:
-        return isinstance(self._get_client(), AzureOpenAI)
 
     @classmethod
     def class_name(cls) -> str:
@@ -530,7 +533,7 @@ class OpenAI(FunctionCallingLLM):
                 if len(response.choices) > 0:
                     delta = response.choices[0].delta
                 else:
-                    if self._is_azure_client():
+                    if isinstance(client, AzureOpenAI):
                         continue
                     else:
                         delta = ChoiceDelta()
@@ -799,7 +802,7 @@ class OpenAI(FunctionCallingLLM):
                         continue
                     delta = response.choices[0].delta
                 else:
-                    if self._is_azure_client():
+                    if isinstance(aclient, AsyncAzureOpenAI):
                         continue
                     else:
                         delta = ChoiceDelta()
@@ -906,12 +909,15 @@ class OpenAI(FunctionCallingLLM):
         chat_history: Optional[List[ChatMessage]] = None,
         verbose: bool = False,
         allow_parallel_tool_calls: bool = False,
-        tool_choice: Union[str, dict] = "auto",
+        tool_required: bool = False,
+        tool_choice: Optional[Union[str, dict]] = None,
         strict: Optional[bool] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Predict and call the tool."""
-        tool_specs = [tool.metadata.to_openai_tool() for tool in tools]
+        tool_specs = [
+            tool.metadata.to_openai_tool(skip_length_check=True) for tool in tools
+        ]
 
         # if strict is passed in, use, else default to the class-level attribute, else default to True`
         if strict is not None:
@@ -936,7 +942,9 @@ class OpenAI(FunctionCallingLLM):
         return {
             "messages": messages,
             "tools": tool_specs or None,
-            "tool_choice": resolve_tool_choice(tool_choice) if tool_specs else None,
+            "tool_choice": resolve_tool_choice(tool_choice, tool_required)
+            if tool_specs
+            else None,
             **kwargs,
         }
 
@@ -979,7 +987,7 @@ class OpenAI(FunctionCallingLLM):
             # this should handle both complete and partial jsons
             try:
                 argument_dict = parse_partial_json(tool_call.function.arguments)
-            except ValueError:
+            except (ValueError, TypeError, JSONDecodeError):
                 argument_dict = {}
 
             tool_selections.append(

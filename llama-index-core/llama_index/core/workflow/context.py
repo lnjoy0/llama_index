@@ -2,7 +2,6 @@ import asyncio
 import functools
 import json
 import time
-import uuid
 import warnings
 from collections import defaultdict
 from typing import (
@@ -24,19 +23,35 @@ from llama_index.core.instrumentation.dispatcher import Dispatcher
 from .checkpointer import CheckpointCallback
 from .context_serializers import BaseSerializer, JsonSerializer
 from .decorators import StepConfig
-from .errors import WorkflowCancelledByUser, WorkflowDone, WorkflowRuntimeError
+from .errors import (
+    ContextSerdeError,
+    WorkflowCancelledByUser,
+    WorkflowDone,
+    WorkflowRuntimeError,
+)
 from .events import Event, InputRequiredEvent
 from .service import ServiceManager
+from .resource import ResourceManager
 from .types import RunResultT
 
 if TYPE_CHECKING:  # pragma: no cover
     from .workflow import Workflow
 
 T = TypeVar("T", bound=Event)
+EventBuffer = Dict[str, List[Event]]
+
+
+# Only warn once about unserializable keys
+class UnserializableKeyWarning(Warning):
+    pass
+
+
+warnings.simplefilter("once", UnserializableKeyWarning)
 
 
 class Context:
-    """A global object representing a context for a given workflow run.
+    """
+    A global object representing a context for a given workflow run.
 
     The Context object can be used to store data that needs to be available across iterations during a workflow
     execution, and across multiple workflow runs.
@@ -45,6 +60,10 @@ class Context:
 
     Both `set` and `get` operations on global data are governed by a lock, and considered coroutine-safe.
     """
+
+    # These keys are set by pre-built workflows and
+    # are known to be unserializable in some cases.
+    known_unserializable_keys = ("memory",)
 
     def __init__(
         self,
@@ -66,8 +85,7 @@ class Context:
         self._globals: Dict[str, Any] = {}
 
     def _init_broker_data(self) -> None:
-        self._waiter_id = str(uuid.uuid4())
-        self._queues: Dict[str, asyncio.Queue] = {self._waiter_id: asyncio.Queue()}
+        self._queues: Dict[str, asyncio.Queue] = {}
         self._tasks: Set[asyncio.Task] = set()
         self._broker_log: List[Event] = []
         self._cancel_flag: asyncio.Event = asyncio.Event()
@@ -93,7 +111,7 @@ class Context:
         # Streaming machinery
         self._streaming_queue: asyncio.Queue = asyncio.Queue()
         # Step-specific instance
-        self._events_buffer: Dict[str, List[Event]] = defaultdict(list)
+        self._event_buffers: Dict[str, EventBuffer] = {}
 
     def _serialize_queue(self, queue: asyncio.Queue, serializer: BaseSerializer) -> str:
         queue_items = list(queue._queue)  # type: ignore
@@ -120,6 +138,14 @@ class Context:
             try:
                 serialized_globals[key] = serializer.serialize(value)
             except Exception as e:
+                if key in self.known_unserializable_keys:
+                    # Skip serialization of known unserializable keys
+                    warnings.warn(
+                        f"Skipping serialization of known unserializable key: {key} -- "
+                        "This is expected but will require this item to be set manually after deserialization.",
+                        category=UnserializableKeyWarning,
+                    )
+                    continue
                 raise ValueError(f"Failed to serialize value for key {key}: {e}")
         return serialized_globals
 
@@ -144,9 +170,12 @@ class Context:
                 k: self._serialize_queue(v, serializer) for k, v in self._queues.items()
             },
             "stepwise": self.stepwise,
-            "events_buffer": {
-                k: [serializer.serialize(ev) for ev in v]
-                for k, v in self._events_buffer.items()
+            "event_buffers": {
+                k: {
+                    inner_k: [serializer.serialize(ev) for ev in inner_v]
+                    for inner_k, inner_v in v.items()
+                }
+                for k, v in self._event_buffers.items()
             },
             "in_progress": {
                 k: [serializer.serialize(ev) for ev in v]
@@ -154,7 +183,6 @@ class Context:
             },
             "accepted_events": self._accepted_events,
             "broker_log": [serializer.serialize(ev) for ev in self._broker_log],
-            "waiter_id": self._waiter_id,
             "is_running": self.is_running,
         }
 
@@ -167,37 +195,43 @@ class Context:
     ) -> "Context":
         serializer = serializer or JsonSerializer()
 
-        context = cls(workflow, stepwise=data["stepwise"])
-        context._globals = context._deserialize_globals(data["globals"], serializer)
-        context._streaming_queue = context._deserialize_queue(
-            data["streaming_queue"], serializer
-        )
-        context._events_buffer = defaultdict(
-            list,
-            {
-                k: [serializer.deserialize(ev) for ev in v]
-                for k, v in data["events_buffer"].items()
-            },
-        )
-        if len(context._events_buffer) == 0:
-            context._events_buffer = defaultdict(list)
-        context._accepted_events = data["accepted_events"]
-        context._waiter_id = data.get("waiter_id", str(uuid.uuid4()))
-        context._broker_log = [serializer.deserialize(ev) for ev in data["broker_log"]]
-        context.is_running = data["is_running"]
-        # load back up whatever was in the queue as well as the events whose steps
-        # were in progress when the serialization of the Context took place
-        context._queues = {
-            k: context._deserialize_queue(
-                v, serializer, prefix_queue_objs=data["in_progress"].get(k, [])
+        try:
+            context = cls(workflow, stepwise=data["stepwise"])
+            context._globals = context._deserialize_globals(data["globals"], serializer)
+            context._streaming_queue = context._deserialize_queue(
+                data["streaming_queue"], serializer
             )
-            for k, v in data["queues"].items()
-        }
-        context._in_progress = defaultdict(list)
-        return context
+
+            context._event_buffers = {}
+            for buffer_id, type_events_map in data["event_buffers"].items():
+                context._event_buffers[buffer_id] = {}
+                for event_type, events_list in type_events_map.items():
+                    context._event_buffers[buffer_id][event_type] = [
+                        serializer.deserialize(ev) for ev in events_list
+                    ]
+
+            context._accepted_events = data["accepted_events"]
+            context._broker_log = [
+                serializer.deserialize(ev) for ev in data["broker_log"]
+            ]
+            context.is_running = data["is_running"]
+            # load back up whatever was in the queue as well as the events whose steps
+            # were in progress when the serialization of the Context took place
+            context._queues = {
+                k: context._deserialize_queue(
+                    v, serializer, prefix_queue_objs=data["in_progress"].get(k, [])
+                )
+                for k, v in data["queues"].items()
+            }
+            context._in_progress = defaultdict(list)
+            return context
+        except KeyError as e:
+            msg = "Error creating a Context instance: the provided payload has a wrong or old format."
+            raise ContextSerdeError(msg) from e
 
     async def set(self, key: str, value: Any, make_private: bool = False) -> None:
-        """Store `value` into the Context under `key`.
+        """
+        Store `value` into the Context under `key`.
 
         Args:
             key: A unique string to identify the value stored.
@@ -205,6 +239,7 @@ class Context:
 
         Raises:
             ValueError: When make_private is True but a key already exists in the global storage.
+
         """
         if make_private:
             warnings.warn(
@@ -215,21 +250,25 @@ class Context:
             self._globals[key] = value
 
     async def mark_in_progress(self, name: str, ev: Event) -> None:
-        """Add input event to in_progress dict.
+        """
+        Add input event to in_progress dict.
 
         Args:
             name (str): The name of the step that is in progress.
             ev (Event): The input event that kicked off this step.
+
         """
         async with self.lock:
             self._in_progress[name].append(ev)
 
     async def remove_from_in_progress(self, name: str, ev: Event) -> None:
-        """Remove input event from active steps.
+        """
+        Remove input event from active steps.
 
         Args:
             name (str): The name of the step that has been completed.
             ev (Event): The associated input event that kicked of this completed step.
+
         """
         async with self.lock:
             events = [e for e in self._in_progress[name] if e != ev]
@@ -250,7 +289,8 @@ class Context:
             return list(self._currently_running_steps)
 
     async def get(self, key: str, default: Optional[Any] = Ellipsis) -> Any:
-        """Get the value corresponding to `key` from the Context.
+        """
+        Get the value corresponding to `key` from the Context.
 
         Args:
             key: A unique string to identify the value stored.
@@ -258,6 +298,7 @@ class Context:
 
         Raises:
             ValueError: When there's not value accessible corresponding to `key`.
+
         """
         async with self.lock:
             if key in self._globals:
@@ -270,7 +311,8 @@ class Context:
 
     @property
     def data(self) -> Dict[str, Any]:  # pragma: no cover
-        """This property is provided for backward compatibility.
+        """
+        This property is provided for backward compatibility.
 
         Use `get` and `set` instead.
         """
@@ -293,10 +335,27 @@ class Context:
     def _get_full_path(self, ev_type: Type[Event]) -> str:
         return f"{ev_type.__module__}.{ev_type.__name__}"
 
+    def _get_event_buffer_id(self, events: List[Type[Event]]) -> str:
+        # Try getting the current task name
+        try:
+            current_task = asyncio.current_task()
+            if current_task:
+                t_name = current_task.get_name()
+                # Do not use the default value 'Task'
+                if t_name != "Task":
+                    return t_name
+        except RuntimeError as e:
+            # This is a sync step, fallback to using events list
+            pass
+
+        # Fall back to creating a stable identifier from expected events
+        return ":".join(sorted(self._get_full_path(e_type) for e_type in events))
+
     def collect_events(
-        self, ev: Event, expected: List[Type[Event]]
+        self, ev: Event, expected: List[Type[Event]], buffer_id: Optional[str] = None
     ) -> Optional[List[Event]]:
-        """Collects events for buffering in workflows.
+        """
+        Collects events for buffering in workflows.
 
         This method adds the current event to the internal buffer and attempts to collect all
         expected event types. If all expected events are found, they will be returned in order.
@@ -305,30 +364,47 @@ class Context:
         Args:
             ev (Event): The current event to add to the buffer.
             expected (List[Type[Event]]): List of expected event types to collect.
+            buffer_id (str): A unique identifier for the events collected. Ideally this should be
+            the step name, so to avoid any interference between different steps. If not provided,
+            a stable identifier will be created using the list of expected events.
 
         Returns:
             Optional[List[Event]]: List of collected events in the order of expected types if all
                                   expected events are found; otherwise None.
+
         """
-        self._events_buffer[self._get_full_path(type(ev))].append(ev)
+        buffer_id = buffer_id or self._get_event_buffer_id(expected)
+
+        if buffer_id not in self._event_buffers:
+            self._event_buffers[buffer_id] = defaultdict(list)
+
+        event_type_path = self._get_full_path(type(ev))
+        self._event_buffers[buffer_id][event_type_path].append(ev)
 
         retval: List[Event] = []
         for e_type in expected:
-            e_instance_list = self._events_buffer.get(self._get_full_path(e_type))
+            e_type_path = self._get_full_path(e_type)
+            e_instance_list = self._event_buffers[buffer_id].get(e_type_path, [])
             if e_instance_list:
                 retval.append(e_instance_list.pop(0))
+            else:
+                # We already know we don't have all the events
+                break
 
         if len(retval) == len(expected):
             return retval
 
         # put back the events if unable to collect all
-        for ev in retval:
-            self._events_buffer[self._get_full_path(type(ev))].append(ev)
+        for i, ev_to_restore in enumerate(retval):
+            e_type = type(retval[i])
+            e_type_path = self._get_full_path(e_type)
+            self._event_buffers[buffer_id][e_type_path].append(ev_to_restore)
 
         return None
 
     def add_holding_event(self, event: Event) -> None:
-        """Add an event to the list of those collected in current step.
+        """
+        Add an event to the list of those collected in current step.
 
         This is only relevant for stepwise execution.
         """
@@ -346,7 +422,8 @@ class Context:
         return list(self._step_events_holding)
 
     def send_event(self, message: Event, step: Optional[str] = None) -> None:
-        """Sends an event to a specific step in the workflow.
+        """
+        Sends an event to a specific step in the workflow.
 
         If step is None, the event is sent to all the receivers and we let
         them discard events they don't want.
@@ -373,13 +450,20 @@ class Context:
     async def wait_for_event(
         self,
         event_type: Type[T],
+        waiter_event: Optional[Event] = None,
+        waiter_id: Optional[str] = None,
         requirements: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = 2000,
     ) -> T:
-        """Asynchronously wait for a specific event type to be received.
+        """
+        Asynchronously wait for a specific event type to be received.
+
+        If provided, `waiter_event` will be written to the event stream to let the caller know that we're waiting for a response.
 
         Args:
             event_type: The type of event to wait for
+            waiter_event: The event to emit to the event stream to let the caller know that we're waiting for a response
+            waiter_id: A unique identifier for this specific wait call. It helps ensure that we only send one `waiter_event` for each `waiter_id`.
             requirements: Optional dict of requirements the event must match
             timeout: Optional timeout in seconds. Defaults to 2000s.
 
@@ -388,20 +472,39 @@ class Context:
 
         Raises:
             asyncio.TimeoutError: If the timeout is reached before receiving matching event
+
         """
         requirements = requirements or {}
 
+        # Generate a unique key for the waiter
+        event_str = self._get_full_path(event_type)
+        requirements_str = str(requirements)
+        waiter_id = waiter_id or f"waiter_{event_str}_{requirements_str}"
+
+        if waiter_id not in self._queues:
+            self._queues[waiter_id] = asyncio.Queue()
+
+        # send the waiter event if it's not already sent
+        if waiter_event is not None:
+            is_waiting = await self.get(waiter_id, default=False)
+            if not is_waiting:
+                await self.set(waiter_id, True)
+                self.write_event_to_stream(waiter_event)
+
         while True:
-            event = await asyncio.wait_for(
-                self._queues[self._waiter_id].get(), timeout=timeout
-            )
-            if type(event) is event_type:
-                if all(
-                    event.get(k, default=None) == v for k, v in requirements.items()
-                ):
-                    return event
-                else:
-                    continue
+            try:
+                event = await asyncio.wait_for(
+                    self._queues[waiter_id].get(), timeout=timeout
+                )
+                if type(event) is event_type:
+                    if all(
+                        event.get(k, default=None) == v for k, v in requirements.items()
+                    ):
+                        return event
+                    else:
+                        continue
+            finally:
+                await self.set(waiter_id, False)
 
     def write_event_to_stream(self, ev: Optional[Event]) -> None:
         self._streaming_queue.put_nowait(ev)
@@ -420,7 +523,8 @@ class Context:
         self._globals.clear()
 
     async def shutdown(self) -> None:
-        """To be called when a workflow ends.
+        """
+        To be called when a workflow ends.
 
         We clear all the tasks and set the is_running flag. Note that we
         don't clear _globals or _queues so that the context can be still
@@ -444,6 +548,7 @@ class Context:
         checkpoint_callback: Optional[CheckpointCallback],
         run_id: str,
         service_manager: ServiceManager,
+        resource_manager: ResourceManager,
         dispatcher: Dispatcher,
     ) -> None:
         self._tasks.add(
@@ -457,6 +562,7 @@ class Context:
                     checkpoint_callback=checkpoint_callback,
                     run_id=run_id,
                     service_manager=service_manager,
+                    resource_manager=resource_manager,
                     dispatcher=dispatcher,
                 ),
                 name=name,
@@ -473,6 +579,7 @@ class Context:
         checkpoint_callback: Optional[CheckpointCallback],
         run_id: str,
         service_manager: ServiceManager,
+        resource_manager: ResourceManager,
         dispatcher: Dispatcher,
     ) -> None:
         while True:
@@ -500,6 +607,10 @@ class Context:
                     service_definition.name, service_definition.default_value
                 )
                 kwargs[service_definition.name] = service
+            for resource in config.resources:
+                kwargs[resource.name] = await resource_manager.get(
+                    resource=resource.resource
+                )
             kwargs[config.event_name] = ev
 
             # wrap the step with instrumentation
@@ -517,6 +628,7 @@ class Context:
                         new_ev = await instrumented_step(**kwargs)
                         kwargs.clear()
                         break  # exit the retrying loop
+
                     except WorkflowDone:
                         await self.remove_from_in_progress(name=name, ev=ev)
                         raise
