@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shlex
 import shutil
 from argparse import ArgumentParser
 from glob import iglob
@@ -14,8 +15,8 @@ from llama_index.core import (
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.base.response.schema import (
     RESPONSE_TYPE,
-    StreamingResponse,
     Response,
+    StreamingResponse,
 )
 from llama_index.core.bridge.pydantic import BaseModel, Field, field_validator
 from llama_index.core.chat_engine import CondenseQuestionChatEngine
@@ -149,6 +150,155 @@ class RagCLI(BaseModel):
         query_pipeline.add_link("query", "summarizer", dest_key="query_str")
         return query_pipeline
 
+    @field_validator("chat_engine", mode="before")
+    def chat_engine_from_query_pipeline(
+        cls, chat_engine: Any, values: Dict[str, Any]
+    ) -> Optional[CondenseQuestionChatEngine]:
+        """
+        If chat_engine is not provided, create one from query_pipeline.
+        """
+        if chat_engine is not None:
+            return chat_engine
+
+        if values.get("query_pipeline") is None:
+            values["query_pipeline"] = cls.query_pipeline_from_ingestion_pipeline(
+                query_pipeline=None, values=values
+            )
+
+        query_pipeline = cast(QueryPipeline, values["query_pipeline"])
+        if query_pipeline is None:
+            return None
+        query_engine = QueryPipelineQueryEngine(query_pipeline=query_pipeline)  # type: ignore
+        verbose = cast(bool, values["verbose"])
+        llm = cast(LLM, values["llm"])
+        return CondenseQuestionChatEngine.from_defaults(
+            query_engine=query_engine, llm=llm, verbose=verbose
+        )
+
+    async def handle_cli(
+        self,
+        files: Optional[List[str]] = None,
+        question: Optional[str] = None,
+        chat: bool = False,
+        verbose: bool = False,
+        clear: bool = False,
+        create_llama: bool = False,
+        **kwargs: Dict[str, Any],
+    ) -> None:
+        """
+        Entrypoint for local document RAG CLI tool.
+        """
+        if clear:
+            # delete self.persist_dir directory including all subdirectories and files
+            if os.path.exists(self.persist_dir):
+                # Ask for confirmation
+                response = input(
+                    f"Are you sure you want to delete data within {self.persist_dir}? [y/N] "
+                )
+                if response.strip().lower() != "y":
+                    print("Aborted.")
+                    return
+                os.system(f"rm -rf {self.persist_dir}")
+            print(f"Successfully cleared {self.persist_dir}")
+
+        self.verbose = verbose
+        ingestion_pipeline = cast(IngestionPipeline, self.ingestion_pipeline)
+        if self.verbose:
+            print("Saving/Loading from persist_dir: ", self.persist_dir)
+        if files is not None:
+            expanded_files = []
+            for pattern in files:
+                expanded_files.extend(iglob(pattern, recursive=True))
+            documents = []
+            for _file in expanded_files:
+                _file = os.path.abspath(_file)
+                if os.path.isdir(_file):
+                    reader = SimpleDirectoryReader(
+                        input_dir=_file,
+                        filename_as_id=True,
+                        file_extractor=self.file_extractor,
+                    )
+                else:
+                    reader = SimpleDirectoryReader(
+                        input_files=[_file],
+                        filename_as_id=True,
+                        file_extractor=self.file_extractor,
+                    )
+
+                documents.extend(reader.load_data(show_progress=verbose))
+
+            await ingestion_pipeline.arun(show_progress=verbose, documents=documents)
+            ingestion_pipeline.persist(persist_dir=self.persist_dir)
+
+            # Append the `--files` argument to the history file
+            with open(f"{self.persist_dir}/{RAG_HISTORY_FILE_NAME}", "a") as f:
+                for file in files:
+                    f.write(str(file) + "\n")
+
+        if create_llama:
+            if shutil.which("npx") is None:
+                print(
+                    "`npx` is not installed. Please install it by calling `npm install -g npx`"
+                )
+            else:
+                history_file_path = Path(f"{self.persist_dir}/{RAG_HISTORY_FILE_NAME}")
+                if not history_file_path.exists():
+                    print(
+                        "No data has been ingested, "
+                        "please specify `--files` to create llama dataset."
+                    )
+                else:
+                    with open(history_file_path) as f:
+                        stored_paths = {line.strip() for line in f if line.strip()}
+                    if len(stored_paths) == 0:
+                        print(
+                            "No data has been ingested, "
+                            "please specify `--files` to create llama dataset."
+                        )
+                    elif len(stored_paths) > 1:
+                        print(
+                            "Multiple files or folders were ingested, which is not supported by create-llama. "
+                            "Please call `llamaindex-cli rag --clear` to clear the cache first, "
+                            "then call `llamaindex-cli rag --files` again with a single folder or file"
+                        )
+                    else:
+                        path = stored_paths.pop()
+                        if "*" in path:
+                            print(
+                                "Glob pattern is not supported by create-llama. "
+                                "Please call `llamaindex-cli rag --clear` to clear the cache first, "
+                                "then call `llamaindex-cli rag --files` again with a single folder or file."
+                            )
+                        elif not os.path.exists(path):
+                            print(
+                                f"The path {path} does not exist. "
+                                "Please call `llamaindex-cli rag --clear` to clear the cache first, "
+                                "then call `llamaindex-cli rag --files` again with a single folder or file."
+                            )
+                        else:
+                            print(f"Calling create-llama using data from {path} ...")
+                            command_args = [
+                                "npx",
+                                "create-llama@latest",
+                                "--frontend",
+                                "--template",
+                                "streaming",
+                                "--framework",
+                                "fastapi",
+                                "--ui",
+                                "shadcn",
+                                "--vector-db",
+                                "none",
+                                "--engine",
+                                "context",
+                                f"--files {shlex.quote(path)}",
+                            ]
+                            os.system(" ".join(command_args))
+
+        if question is not None:
+            await self.handle_question(question)
+        if chat:
+            await self.start_chat_repl()
 
     async def handle_question(self, question: str) -> None:
         if self.query_pipeline is None:
