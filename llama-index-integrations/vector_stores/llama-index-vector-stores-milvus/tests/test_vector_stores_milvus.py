@@ -373,6 +373,39 @@ class TestMilvusAsync:
         assert result.nodes[1].id_ == "n2"
         assert result.nodes[1].text == "n2_text"
 
+    async def test_query_sparse_mode(self, event_loop):
+        vector_store = MilvusVectorStore(
+            uri=TEST_URI,
+            collection_name="test_collection",
+            overwrite=True,
+            enable_dense=False,
+            enable_sparse=True,
+            sparse_embedding_function=MockSparseEmbeddingFunction(),
+            consistency_level="Strong",
+        )
+        node1 = TextNode(
+            id_="n1",
+            text="n1_text",
+            # embedding=[0.5] * 64,
+            relationships={NodeRelationship.SOURCE: RelatedNodeInfo(node_id="n2")},
+        )
+        node2 = TextNode(
+            id_="n2",
+            text="n2_text",
+            # embedding=[-0.5] * 64,  # opposite direction of node1's embedding
+            relationships={NodeRelationship.SOURCE: RelatedNodeInfo(node_id="n3")},
+        )
+        await vector_store.async_add([node1, node2])
+        query = VectorStoreQuery(
+            query_str="mock_str",
+            similarity_top_k=1,
+            mode=VectorStoreQueryMode.SPARSE,
+        )
+        result = await vector_store.aquery(query=query)
+        assert len(result.nodes) == 1
+        assert result.nodes[0].id_ == "n1"
+        assert result.nodes[0].text == "n1_text"
+
     async def test_query_hybrid_mode(self, event_loop):
         vector_store = MilvusVectorStore(
             uri=TEST_URI,
@@ -408,6 +441,78 @@ class TestMilvusAsync:
         assert len(result.nodes) == 1
         assert result.nodes[0].id_ == "n1"
         assert result.nodes[0].text == "n1_text"
+
+    async def test_async_batch_encoding(self, event_loop):
+        vector_store = MilvusVectorStore(
+            uri=TEST_URI,
+            dim=64,
+            collection_name="test_batch_encoding",
+            overwrite=True,
+            enable_sparse=True,
+            sparse_embedding_function=MockSparseEmbeddingFunction(),
+            consistency_level="Strong",
+        )
+
+        # Test batch document encoding
+        nodes = [
+            TextNode(
+                id_=f"n{i}",
+                text=f"text_{i}",
+                embedding=[0.5] * 64,
+            )
+            for i in range(3)
+        ]
+
+        await vector_store.async_add(nodes)
+
+        # Verify the sparse embeddings were batch encoded
+        results = await vector_store.aclient.query(
+            "test_batch_encoding",
+            filter="",
+            output_fields=["id", "sparse_embedding"],
+            limit=10,
+        )
+        assert len(results) == 3
+        for i, result in enumerate(results):
+            assert result["id"] == f"n{i}"
+
+    async def test_async_hybrid_search_with_async_encoding(self, event_loop):
+        vector_store = MilvusVectorStore(
+            uri=TEST_URI,
+            dim=64,
+            collection_name="test_async_hybrid",
+            overwrite=True,
+            enable_sparse=True,
+            hybrid_ranker="RRFRanker",
+            sparse_embedding_function=MockSparseEmbeddingFunction(),
+            consistency_level="Strong",
+        )
+
+        nodes = [
+            TextNode(
+                id_="n1",
+                text="text_1",
+                embedding=[0.5] * 64,
+            ),
+            TextNode(
+                id_="n2",
+                text="text_2",
+                embedding=[-0.5] * 64,
+            ),
+        ]
+
+        await vector_store.async_add(nodes)
+
+        query = VectorStoreQuery(
+            query_embedding=[0.5] * 64,
+            query_str="test_query",
+            similarity_top_k=1,
+            mode=VectorStoreQueryMode.HYBRID,
+        )
+
+        result = await vector_store.aquery(query=query)
+        assert len(result.nodes) == 1
+        assert result.nodes[0].id_ == "n1"
 
 
 class TestMilvusSync:

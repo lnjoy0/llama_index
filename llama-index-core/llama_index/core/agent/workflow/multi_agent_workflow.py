@@ -1,7 +1,11 @@
 from abc import ABCMeta
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union, cast
 
-from llama_index.core.agent.workflow.base_agent import BaseWorkflowAgent
+from llama_index.core.agent.workflow.base_agent import (
+    BaseWorkflowAgent,
+    DEFAULT_AGENT_NAME,
+    DEFAULT_AGENT_DESCRIPTION,
+)
 from llama_index.core.agent.workflow.function_agent import FunctionAgent
 from llama_index.core.agent.workflow.react_agent import ReActAgent
 from llama_index.core.agent.workflow.workflow_events import (
@@ -92,6 +96,19 @@ class AgentWorkflow(Workflow, PromptMixin, metaclass=AgentWorkflowMeta):
         if not agents:
             raise ValueError("At least one agent must be provided")
 
+        # Raise an error if any agent has no name or no description
+        if len(agents) > 1 and any(
+            agent.name == DEFAULT_AGENT_NAME for agent in agents
+        ):
+            raise ValueError("All agents must have a name in a multi-agent workflow")
+
+        if len(agents) > 1 and any(
+            agent.description == DEFAULT_AGENT_DESCRIPTION for agent in agents
+        ):
+            raise ValueError(
+                "All agents must have a description in a multi-agent workflow"
+            )
+
         self.agents = {cfg.name: cfg for cfg in agents}
         if len(agents) == 1:
             root_agent = agents[0].name
@@ -166,6 +183,10 @@ class AgentWorkflow(Workflow, PromptMixin, metaclass=AgentWorkflowMeta):
         self, current_agent: BaseWorkflowAgent
     ) -> Optional[AsyncBaseTool]:
         """Creates a handoff tool for the given agent."""
+        # Do not create a handoff tool if there is only one agent
+        if len(self.agents) == 1:
+            return None
+
         agent_info = {cfg.name: cfg.description for cfg in self.agents.values()}
 
         # Filter out agents that the current agent cannot handoff to
@@ -209,7 +230,7 @@ class AgentWorkflow(Workflow, PromptMixin, metaclass=AgentWorkflowMeta):
             if handoff_tool:
                 tools.append(handoff_tool)
 
-        return self._ensure_tools_are_async(tools)
+        return self._ensure_tools_are_async(cast(List[BaseTool], tools))
 
     async def _init_context(self, ctx: Context, ev: StartEvent) -> None:
         """Initialize the context once, if needed."""
@@ -345,6 +366,12 @@ class AgentWorkflow(Workflow, PromptMixin, metaclass=AgentWorkflowMeta):
             memory: BaseMemory = await ctx.get("memory")
             output = await agent.finalize(ctx, ev, memory)
 
+            cur_tool_calls: List[ToolCallResult] = await ctx.get(
+                "current_tool_calls", default=[]
+            )
+            output.tool_calls.extend(cur_tool_calls)  # type: ignore
+            await ctx.set("current_tool_calls", [])
+
             return StopEvent(result=output)
 
         await ctx.set("num_tool_calls", len(ev.tool_calls))
@@ -417,6 +444,13 @@ class AgentWorkflow(Workflow, PromptMixin, metaclass=AgentWorkflowMeta):
         agent_name: str = await ctx.get("current_agent_name")
         agent: BaseWorkflowAgent = self.agents[agent_name]
 
+        # track tool calls made during a .run() call
+        cur_tool_calls: List[ToolCallResult] = await ctx.get(
+            "current_tool_calls", default=[]
+        )
+        cur_tool_calls.extend(tool_call_results)
+        await ctx.set("current_tool_calls", cur_tool_calls)
+
         await agent.handle_tool_call_results(ctx, tool_call_results, memory)
 
         # set the next agent, if needed
@@ -447,15 +481,16 @@ class AgentWorkflow(Workflow, PromptMixin, metaclass=AgentWorkflowMeta):
                         tool_name=t.tool_name,
                         tool_kwargs=t.tool_kwargs,
                     )
-                    for t in tool_call_results
+                    for t in cur_tool_calls
                 ],
-                raw=str(return_direct_tool.tool_output.raw_output),
+                raw=return_direct_tool.tool_output.raw_output,
                 current_agent_name=agent.name,
             )
             result = await agent.finalize(ctx, result, memory)
 
             # we don't want to stop the system if we're just handing off
             if return_direct_tool.tool_name != "handoff":
+                await ctx.set("current_tool_calls", [])
                 return StopEvent(result=result)
 
         user_msg_str = await ctx.get("user_msg_str")
