@@ -1,7 +1,9 @@
 import functools
+from json.decoder import JSONDecodeError
 from typing import (
     TYPE_CHECKING,
     Any,
+    AsyncGenerator,
     Awaitable,
     Callable,
     Dict,
@@ -11,6 +13,7 @@ from typing import (
     Optional,
     Protocol,
     Sequence,
+    Type,
     Union,
     cast,
     get_args,
@@ -43,7 +46,6 @@ from llama_index.core.base.llms.types import (
     MessageRole,
 )
 from llama_index.core.bridge.pydantic import (
-    BaseModel,
     Field,
     PrivateAttr,
 )
@@ -56,9 +58,11 @@ from llama_index.core.llms.callbacks import (
     llm_completion_callback,
 )
 from llama_index.core.llms.function_calling import FunctionCallingLLM
-from llama_index.core.llms.llm import ToolSelection
+from llama_index.core.llms.llm import ToolSelection, Model
 from llama_index.core.llms.utils import parse_partial_json
-from llama_index.core.types import BaseOutputParser, Model, PydanticProgramMode
+from llama_index.core.prompts import PromptTemplate
+from llama_index.core.program.utils import FlexibleModel
+from llama_index.core.types import BaseOutputParser, PydanticProgramMode
 from llama_index.llms.openai.utils import (
     O1_MODELS,
     OpenAIToolCall,
@@ -74,7 +78,7 @@ from llama_index.llms.openai.utils import (
     to_openai_message_dicts,
     update_tool_calls,
 )
-from openai import AsyncOpenAI, AzureOpenAI
+from openai import AsyncOpenAI, AzureOpenAI, AsyncAzureOpenAI
 from openai import OpenAI as SyncOpenAI
 from openai.types.chat.chat_completion_chunk import (
     ChatCompletionChunk,
@@ -175,6 +179,7 @@ class OpenAI(FunctionCallingLLM):
     )
     max_tokens: Optional[int] = Field(
         description="The maximum number of tokens to generate.",
+        default=None,
         gt=0,
     )
     logprobs: Optional[bool] = Field(
@@ -211,9 +216,13 @@ class OpenAI(FunctionCallingLLM):
         ),
     )
 
-    api_key: str = Field(default=None, description="The OpenAI API key.")
-    api_base: str = Field(description="The base URL for OpenAI API.")
-    api_version: str = Field(description="The API version for OpenAI API.")
+    api_key: Optional[str] = Field(default=None, description="The OpenAI API key.")
+    api_base: Optional[str] = Field(
+        default=None, description="The base URL for OpenAI API."
+    )
+    api_version: Optional[str] = Field(
+        default=None, description="The API version for OpenAI API."
+    )
     strict: bool = Field(
         default=False,
         description="Whether to use strict mode for invoking tools/using schemas.",
@@ -266,6 +275,11 @@ class OpenAI(FunctionCallingLLM):
         audio_config: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
+        # TODO: Support deprecated max_new_tokens
+        if "max_new_tokens" in kwargs:
+            max_tokens = kwargs["max_new_tokens"]
+            del kwargs["max_new_tokens"]
+
         additional_kwargs = additional_kwargs or {}
 
         api_key, api_base, api_version = resolve_openai_credentials(
@@ -331,9 +345,6 @@ class OpenAI(FunctionCallingLLM):
         elif model_name.startswith("ft:"):
             model_name = model_name.split(":")[1]
         return model_name
-
-    def _is_azure_client(self) -> bool:
-        return isinstance(self._get_client(), AzureOpenAI)
 
     @classmethod
     def class_name(cls) -> str:
@@ -522,7 +533,7 @@ class OpenAI(FunctionCallingLLM):
                 if len(response.choices) > 0:
                     delta = response.choices[0].delta
                 else:
-                    if self._is_azure_client():
+                    if isinstance(client, AzureOpenAI):
                         continue
                     else:
                         delta = ChoiceDelta()
@@ -791,7 +802,7 @@ class OpenAI(FunctionCallingLLM):
                         continue
                     delta = response.choices[0].delta
                 else:
-                    if self._is_azure_client():
+                    if isinstance(aclient, AsyncAzureOpenAI):
                         continue
                     else:
                         delta = ChoiceDelta()
@@ -898,12 +909,15 @@ class OpenAI(FunctionCallingLLM):
         chat_history: Optional[List[ChatMessage]] = None,
         verbose: bool = False,
         allow_parallel_tool_calls: bool = False,
-        tool_choice: Union[str, dict] = "auto",
+        tool_required: bool = False,
+        tool_choice: Optional[Union[str, dict]] = None,
         strict: Optional[bool] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Predict and call the tool."""
-        tool_specs = [tool.metadata.to_openai_tool() for tool in tools]
+        tool_specs = [
+            tool.metadata.to_openai_tool(skip_length_check=True) for tool in tools
+        ]
 
         # if strict is passed in, use, else default to the class-level attribute, else default to True`
         if strict is not None:
@@ -928,7 +942,9 @@ class OpenAI(FunctionCallingLLM):
         return {
             "messages": messages,
             "tools": tool_specs or None,
-            "tool_choice": resolve_tool_choice(tool_choice) if tool_specs else None,
+            "tool_choice": resolve_tool_choice(tool_choice, tool_required)
+            if tool_specs
+            else None,
             **kwargs,
         }
 
@@ -971,7 +987,7 @@ class OpenAI(FunctionCallingLLM):
             # this should handle both complete and partial jsons
             try:
                 argument_dict = parse_partial_json(tool_call.function.arguments)
-            except ValueError:
+            except (ValueError, TypeError, JSONDecodeError):
                 argument_dict = {}
 
             tool_selections.append(
@@ -986,62 +1002,80 @@ class OpenAI(FunctionCallingLLM):
 
     @dispatcher.span
     def structured_predict(
-        self, *args: Any, llm_kwargs: Optional[Dict[str, Any]] = None, **kwargs: Any
-    ) -> BaseModel:
+        self,
+        output_cls: Type[Model],
+        prompt: PromptTemplate,
+        llm_kwargs: Optional[Dict[str, Any]] = None,
+        **prompt_args: Any,
+    ) -> Model:
         """Structured predict."""
         llm_kwargs = llm_kwargs or {}
-        all_kwargs = {**llm_kwargs, **kwargs}
 
         llm_kwargs["tool_choice"] = (
-            "required" if "tool_choice" not in all_kwargs else all_kwargs["tool_choice"]
+            "required" if "tool_choice" not in llm_kwargs else llm_kwargs["tool_choice"]
         )
         # by default structured prediction uses function calling to extract structured outputs
         # here we force tool_choice to be required
-        return super().structured_predict(*args, llm_kwargs=llm_kwargs, **kwargs)
+        return super().structured_predict(
+            output_cls, prompt, llm_kwargs=llm_kwargs, **prompt_args
+        )
 
     @dispatcher.span
     async def astructured_predict(
-        self, *args: Any, llm_kwargs: Optional[Dict[str, Any]] = None, **kwargs: Any
-    ) -> BaseModel:
+        self,
+        output_cls: Type[Model],
+        prompt: PromptTemplate,
+        llm_kwargs: Optional[Dict[str, Any]] = None,
+        **prompt_args: Any,
+    ) -> Model:
         """Structured predict."""
         llm_kwargs = llm_kwargs or {}
-        all_kwargs = {**llm_kwargs, **kwargs}
 
         llm_kwargs["tool_choice"] = (
-            "required" if "tool_choice" not in all_kwargs else all_kwargs["tool_choice"]
+            "required" if "tool_choice" not in llm_kwargs else llm_kwargs["tool_choice"]
         )
         # by default structured prediction uses function calling to extract structured outputs
         # here we force tool_choice to be required
-        return await super().astructured_predict(*args, llm_kwargs=llm_kwargs, **kwargs)
+        return await super().astructured_predict(
+            output_cls, prompt, llm_kwargs=llm_kwargs, **prompt_args
+        )
 
     @dispatcher.span
     def stream_structured_predict(
-        self, *args: Any, llm_kwargs: Optional[Dict[str, Any]] = None, **kwargs: Any
-    ) -> Generator[Union[Model, List[Model]], None, None]:
+        self,
+        output_cls: Type[Model],
+        prompt: PromptTemplate,
+        llm_kwargs: Optional[Dict[str, Any]] = None,
+        **prompt_args: Any,
+    ) -> Generator[Union[Model, FlexibleModel], None, None]:
         """Stream structured predict."""
         llm_kwargs = llm_kwargs or {}
-        all_kwargs = {**llm_kwargs, **kwargs}
 
         llm_kwargs["tool_choice"] = (
-            "required" if "tool_choice" not in all_kwargs else all_kwargs["tool_choice"]
+            "required" if "tool_choice" not in llm_kwargs else llm_kwargs["tool_choice"]
         )
         # by default structured prediction uses function calling to extract structured outputs
         # here we force tool_choice to be required
-        return super().stream_structured_predict(*args, llm_kwargs=llm_kwargs, **kwargs)
+        return super().stream_structured_predict(
+            output_cls, prompt, llm_kwargs=llm_kwargs, **prompt_args
+        )
 
     @dispatcher.span
     async def astream_structured_predict(
-        self, *args: Any, llm_kwargs: Optional[Dict[str, Any]] = None, **kwargs: Any
-    ) -> Generator[Union[Model, List[Model]], None, None]:
+        self,
+        output_cls: Type[Model],
+        prompt: PromptTemplate,
+        llm_kwargs: Optional[Dict[str, Any]] = None,
+        **prompt_args: Any,
+    ) -> AsyncGenerator[Union[Model, FlexibleModel], None]:
         """Stream structured predict."""
         llm_kwargs = llm_kwargs or {}
-        all_kwargs = {**llm_kwargs, **kwargs}
 
         llm_kwargs["tool_choice"] = (
-            "required" if "tool_choice" not in all_kwargs else all_kwargs["tool_choice"]
+            "required" if "tool_choice" not in llm_kwargs else llm_kwargs["tool_choice"]
         )
         # by default structured prediction uses function calling to extract structured outputs
         # here we force tool_choice to be required
         return await super().astream_structured_predict(
-            *args, llm_kwargs=llm_kwargs, **kwargs
+            output_cls, prompt, llm_kwargs=llm_kwargs, **prompt_args
         )

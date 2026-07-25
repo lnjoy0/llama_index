@@ -1,6 +1,7 @@
 from typing import List, Sequence
 
 from llama_index.core.agent.workflow.base_agent import BaseWorkflowAgent
+from llama_index.core.agent.workflow.single_agent_workflow import SingleAgentRunnerMixin
 from llama_index.core.agent.workflow.workflow_events import (
     AgentInput,
     AgentOutput,
@@ -8,17 +9,21 @@ from llama_index.core.agent.workflow.workflow_events import (
     ToolCallResult,
 )
 from llama_index.core.base.llms.types import ChatResponse
-from llama_index.core.bridge.pydantic import BaseModel
+from llama_index.core.bridge.pydantic import BaseModel, Field
 from llama_index.core.llms import ChatMessage
 from llama_index.core.memory import BaseMemory
 from llama_index.core.tools import AsyncBaseTool
 from llama_index.core.workflow import Context
 
 
-class FunctionAgent(BaseWorkflowAgent):
+class FunctionAgent(SingleAgentRunnerMixin, BaseWorkflowAgent):
     """Function calling agent implementation."""
 
     scratchpad_key: str = "scratchpad"
+    allow_parallel_tool_calls: bool = Field(
+        default=True,
+        description="If True, the agent will call multiple tools in parallel. If False, the agent will call tools sequentially.",
+    )
 
     async def take_step(
         self,
@@ -39,7 +44,9 @@ class FunctionAgent(BaseWorkflowAgent):
         )
 
         response = await self.llm.astream_chat_with_tools(  # type: ignore
-            tools, chat_history=current_llm_input, allow_parallel_tool_calls=True
+            tools=tools,
+            chat_history=current_llm_input,
+            allow_parallel_tool_calls=self.allow_parallel_tool_calls,
         )
         # last_chat_response will be used later, after the loop.
         # We initialize it so it's valid even when 'response' is empty
@@ -116,13 +123,13 @@ class FunctionAgent(BaseWorkflowAgent):
     async def finalize(
         self, ctx: Context, output: AgentOutput, memory: BaseMemory
     ) -> AgentOutput:
-        """Finalize the function calling agent.
+        """
+        Finalize the function calling agent.
 
         Adds all in-progress messages to memory.
         """
         scratchpad: List[ChatMessage] = await ctx.get(self.scratchpad_key, default=[])
-        for msg in scratchpad:
-            await memory.aput(msg)
+        await memory.aput_messages(scratchpad)
 
         # reset scratchpad
         await ctx.set(self.scratchpad_key, [])
