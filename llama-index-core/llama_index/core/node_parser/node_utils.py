@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class IdFuncCallable(Protocol):
-    def __call__(self, i: int, doc: BaseNode) -> str:
-        ...
+    def __call__(self, i: int, doc: BaseNode) -> str: ...
 
 
 def default_id_func(i: int, doc: BaseNode) -> str:
@@ -43,7 +42,6 @@ def build_nodes_from_splits(
     relationships = {NodeRelationship.SOURCE: ref_doc.as_related_node_info()}
     for i, text_chunk in enumerate(text_splits):
         logger.debug(f"> Adding chunk: {truncate_text(text_chunk, 50)}")
-
         if isinstance(document, ImageDocument):
             image_node = ImageNode(
                 id_=id_func(i, document),

@@ -21,10 +21,12 @@ from llama_index.core.llms.llm import LLM
 from llama_index.core.types import BaseOutputParser, PydanticProgramMode, Thread
 
 from langchain.base_language import BaseLanguageModel
+from langchain.schema import AIMessage
 
 
 class LangChainLLM(LLM):
-    """Adapter for a LangChain LLM.
+    """
+    Adapter for a LangChain LLM.
 
     Examples:
         `pip install llama-index-llms-langchain`
@@ -41,6 +43,7 @@ class LangChainLLM(LLM):
         for r in response_gen:
             print(r.delta, end="")
         ```
+
     """
 
     _llm: Any = PrivateAttr()
@@ -103,7 +106,9 @@ class LangChainLLM(LLM):
         if not formatted:
             prompt = self.completion_to_prompt(prompt)
 
-        output_str = self._llm.predict(prompt, **kwargs)
+        output_str = self._llm.invoke(prompt, **kwargs)
+        if isinstance(output_str, AIMessage):
+            output_str = output_str.content
         return CompletionResponse(text=output_str)
 
     @llm_chat_callback()

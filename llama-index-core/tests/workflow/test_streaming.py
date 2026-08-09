@@ -19,12 +19,12 @@ class StreamingWorkflow(Workflow):
                 yield word
 
         async for w in stream_messages():
-            ctx.session.write_event_to_stream(Event(msg=w))
+            ctx.write_event_to_stream(Event(msg=w))
 
         return StopEvent(result=None)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_e2e():
     wf = StreamingWorkflow()
     r = wf.run()
@@ -36,7 +36,7 @@ async def test_e2e():
     await r
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_too_many_runs():
     wf = StreamingWorkflow()
     r = asyncio.gather(wf.run(), wf.run())
@@ -49,7 +49,7 @@ async def test_too_many_runs():
     await r
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_task_raised():
     class DummyWorkflow(Workflow):
         @step
@@ -72,7 +72,7 @@ async def test_task_raised():
         await r
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_task_timeout():
     class DummyWorkflow(Workflow):
         @step
@@ -94,7 +94,7 @@ async def test_task_timeout():
         await r
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_multiple_sequential_streams():
     wf = StreamingWorkflow()
     r = wf.run()
@@ -111,7 +111,7 @@ async def test_multiple_sequential_streams():
     await r
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_multiple_ongoing_streams():
     wf = StreamingWorkflow()
     stream_1 = wf.run()
@@ -128,7 +128,7 @@ async def test_multiple_ongoing_streams():
     await asyncio.gather(stream_1, stream_2)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_resume_streams():
     class CounterWorkflow(Workflow):
         @step
@@ -145,10 +145,12 @@ async def test_resume_streams():
     async for _ in handler_1.stream_events():
         pass
     await handler_1
+    assert handler_1.ctx
 
     handler_2 = wf.run(ctx=handler_1.ctx)
     async for _ in handler_2.stream_events():
         pass
     await handler_2
 
+    assert handler_2.ctx
     assert await handler_2.ctx.get("cur_count") == 2

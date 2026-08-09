@@ -1,3 +1,4 @@
+import deprecated
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -9,7 +10,6 @@ from typing import (
     Sequence,
     Union,
 )
-from google.protobuf.json_format import MessageToDict
 from llama_index.core.base.llms.types import (
     ChatMessage,
     ChatResponse,
@@ -42,13 +42,21 @@ from llama_index.llms.vertex.utils import (
     force_single_tool_call,
 )
 from vertexai.generative_models._generative_models import SafetySettingsType
+from vertexai.generative_models import ToolConfig
 
 if TYPE_CHECKING:
     from llama_index.core.tools.types import BaseTool
 
 
+@deprecated.deprecated(
+    reason=(
+        "Should use `llama-index-llms-google-genai` instead, using Google's latest unified SDK. "
+        "See: https://docs.llamaindex.ai/en/stable/examples/llm/google_genai/"
+    )
+)
 class Vertex(FunctionCallingLLM):
-    """Vertext LLM.
+    """
+    Vertext LLM.
 
     Examples:
         `pip install llama-index-llms-vertex`
@@ -74,6 +82,7 @@ class Vertex(FunctionCallingLLM):
         response = llm.complete("Hello world!")
         print(str(response))
         ```
+
     """
 
     model: str = Field(description="The vertex model to use.")
@@ -446,7 +455,8 @@ class Vertex(FunctionCallingLLM):
         user_msg: Optional[Union[str, ChatMessage]] = None,
         chat_history: Optional[List[ChatMessage]] = None,
         verbose: bool = False,
-        allow_parallel_tool_calls: bool = False,
+        allow_parallel_tool_calls: bool = False,  # theoretically supported, but not implemented
+        tool_required: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Prepare the arguments needed to let the LLM chat with tools."""
@@ -466,11 +476,29 @@ class Vertex(FunctionCallingLLM):
                 }
             )
 
+        tool_config = (
+            {"tool_config": self._to_function_calling_config(tool_required)}
+            if self._is_gemini
+            else {}
+        )
+
+        print("tool_config", tool_config)
         return {
             "messages": chat_history,
             "tools": tool_dicts or None,
+            **tool_config,
             **kwargs,
         }
+
+    def _to_function_calling_config(self, tool_required: bool) -> ToolConfig:
+        return ToolConfig(
+            function_calling_config=ToolConfig.FunctionCallingConfig(
+                mode=ToolConfig.FunctionCallingConfig.Mode.ANY
+                if tool_required
+                else ToolConfig.FunctionCallingConfig.Mode.AUTO,
+                allowed_function_names=None,
+            )
+        )
 
     def _validate_chat_with_tools_response(
         self,
@@ -503,7 +531,7 @@ class Vertex(FunctionCallingLLM):
 
         tool_selections = []
         for tool_call in tool_calls:
-            response_dict = MessageToDict(tool_call._pb)
+            response_dict = tool_call.to_dict()
             if "args" not in response_dict or "name" not in response_dict:
                 raise ValueError("Invalid tool call.")
             argument_dict = response_dict["args"]

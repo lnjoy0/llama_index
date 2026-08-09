@@ -11,7 +11,6 @@ from llama_index.core.base.llms.generic_utils import (
 
 from llama_index.llms.openai_like import OpenAILike
 from llama_index.core.llms.function_calling import FunctionCallingLLM
-from urllib.parse import urlparse
 from llama_index.core.base.llms.types import (
     ChatMessage,
     ChatResponse,
@@ -73,6 +72,7 @@ class NVIDIA(OpenAILike, FunctionCallingLLM):
 
         Raises:
             DeprecationWarning: If an API key is not provided for a hosted NIM, a warning is issued. This will become an error in version 0.2.0.
+
         """
         api_key = get_from_param_or_env(
             "api_key",
@@ -128,27 +128,6 @@ class NVIDIA(OpenAILike, FunctionCallingLLM):
         else:
             self.model = DEFAULT_MODEL
 
-    def _validate_url(self, base_url):
-        """
-        validate the base_url.
-        if the base_url is not a url, raise an error
-        if the base_url does not end in /v1, e.g. /completions, /chat/completions,
-        emit a warning. old documentation told users to pass in the full
-        inference url, which is incorrect and prevents model listing from working.
-        normalize base_url to end in /v1.
-        """
-        if base_url is not None:
-            base_url = base_url.rstrip("/")
-            parsed = urlparse(base_url)
-
-            # Ensure scheme and netloc (domain name) are present
-            if not (parsed.scheme and parsed.netloc):
-                expected_format = "Expected format is: http://host:port"
-                raise ValueError(
-                    f"Invalid base_url format. {expected_format} Got: {base_url}"
-                )
-        return base_url
-
     def _validate_model(self, model_name: str) -> None:
         """
         Validates compatibility of the hosted model with the client.
@@ -158,6 +137,7 @@ class NVIDIA(OpenAILike, FunctionCallingLLM):
 
         Raises:
             ValueError: If the model is incompatible with the client.
+
         """
         if self._is_hosted:
             if model := determine_model(model_name):
@@ -189,8 +169,7 @@ class NVIDIA(OpenAILike, FunctionCallingLLM):
                         model = Model(id=model_name)
                     else:
                         raise ValueError(
-                            f"Model {model_name} is unknown, "
-                            "check `available_models`"
+                            f"Model {model_name} is unknown, check `available_models`"
                         )
         else:
             if model_name not in [model.id for model in self.available_models]:
