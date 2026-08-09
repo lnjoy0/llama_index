@@ -65,10 +65,14 @@ class VectaraIndex(BaseManagedIndex):
         vectara_api_key: Optional[str] = None,
         parallelize_ingest: bool = False,
         x_source_str: str = "llama_index",
+        vectara_base_url: str = "https://api.vectara.io",
+        vectara_verify_ssl: bool = True,
         **kwargs: Any,
     ) -> None:
         """Initialize the Vectara API."""
         self.parallelize_ingest = parallelize_ingest
+        self._base_url = vectara_base_url.rstrip("/")
+
         index_struct = VectaraIndexStruct(
             index_id=str(vectara_corpus_key),
             summary="Vectara Index",
@@ -98,11 +102,19 @@ class VectaraIndex(BaseManagedIndex):
 
         # setup requests session with max 3 retries and 90s timeout
         # for calling Vectara API
-        self._session = requests.Session()  # to reuse connections
+        self._session = requests.Session()
+        if not vectara_verify_ssl:
+            self._session.verify = False  # to ignore SSL verification
         adapter = requests.adapters.HTTPAdapter(max_retries=3)
         self._session.mount("https://", adapter)
         self.vectara_api_timeout = 90
         self.doc_ids: List[str] = []
+
+    def __del__(self) -> None:
+        """Attempt to close the session when the object is garbage collected."""
+        if hasattr(self, "_session") and self._session:
+            self._session.close()
+            self._session = None
 
     @lru_cache(maxsize=None)
     def _get_corpus_key(self, corpus_key: str) -> str:
@@ -134,11 +146,12 @@ class VectaraIndex(BaseManagedIndex):
 
         Returns:
             bool: True if deletion was successful, False otherwise.
+
         """
         valid_corpus_key = self._get_corpus_key(corpus_key)
         body = {}
         response = self._session.delete(
-            f"https://api.vectara.io/v2/corpora/{valid_corpus_key}/documents/{doc_id}",
+            f"{self._base_url}/v2/corpora/{valid_corpus_key}/documents/{doc_id}",
             data=json.dumps(body),
             verify=True,
             headers=self._get_post_headers(),
@@ -156,7 +169,7 @@ class VectaraIndex(BaseManagedIndex):
     def _index_doc(self, doc: dict, corpus_key) -> str:
         response = self._session.post(
             headers=self._get_post_headers(),
-            url=f"https://api.vectara.io/v2/corpora/{corpus_key}/documents",
+            url=f"{self._base_url}/v2/corpora/{corpus_key}/documents",
             data=json.dumps(doc),
             timeout=self.vectara_api_timeout,
             verify=True,
@@ -183,6 +196,7 @@ class VectaraIndex(BaseManagedIndex):
             document (Document): a document to index using Vectara's Structured Document type.
             nodes (Sequence[Node]): a list of nodes representing document parts to index a document using Vectara's Core Document type.
             corpus_key (str): If multiple corpora are provided for this index, the corpus_key of the corpus you want to add the document to.
+
         """
         if document:
             # Use Structured Document type
@@ -256,7 +270,7 @@ class VectaraIndex(BaseManagedIndex):
         description: Optional[str] = None,
         max_chars_per_chunk: Optional[int] = None,
     ) -> None:
-        """ "
+        """
         Indexes a document into a corpus using the Vectara Structured Document format.
 
         Full API Docs: https://docs.vectara.com/docs/api-reference/indexing-apis/indexing#structured-document-object-definition
@@ -269,6 +283,7 @@ class VectaraIndex(BaseManagedIndex):
             title (str): The title of the document.
             description (str): The description of the document.
             max_chars_per_chunk (int): The maximum number of characters per chunk.
+
         """
         self._insert(
             document=doc,
@@ -296,6 +311,7 @@ class VectaraIndex(BaseManagedIndex):
             document_id (str): The document id (must be unique for the corpus).
             document_metadata (Dict): The document_metadata to be associated with this document.
             corpus_key (str): If multiple corpora are provided for this index, the corpus_key of the corpus you want to add the document to.
+
         """
         self._insert(
             nodes=nodes,
@@ -334,6 +350,7 @@ class VectaraIndex(BaseManagedIndex):
 
         Returns:
             List of ids associated with each of the files indexed
+
         """
         if not os.path.exists(file_path):
             _logger.error(f"File {file_path} does not exist")
@@ -366,7 +383,7 @@ class VectaraIndex(BaseManagedIndex):
         headers.pop("Content-Type")
         valid_corpus_key = self._get_corpus_key(corpus_key)
         response = self._session.post(
-            f"https://api.vectara.io/v2/corpora/{valid_corpus_key}/upload_file",
+            f"{self._base_url}/v2/corpora/{valid_corpus_key}/upload_file",
             files=files,
             verify=True,
             headers=headers,
@@ -397,6 +414,7 @@ class VectaraIndex(BaseManagedIndex):
                 If False, no change is made to the index or corpus.
             corpus_key (str): corpus key to delete the document from.
                 This should be specified if there are multiple corpora in the index.
+
         """
         if delete_from_docstore:
             if "corpus_key" in delete_kwargs:
@@ -416,6 +434,7 @@ class VectaraIndex(BaseManagedIndex):
             corpus_key (str): corpus key to modify the document from.
                 This should be specified if there are multiple corpora in the index.
             metadata (dict): dictionary specifying any modifications or additions to the document's metadata.
+
         """
         if "metadata" in update_kwargs:
             if "corpus_key" in update_kwargs:
@@ -426,7 +445,7 @@ class VectaraIndex(BaseManagedIndex):
             doc_id = document.doc_id
             body = {"metadata": update_kwargs["metadata"]}
             response = self._session.patch(
-                f"https://api.vectara.io/v2/corpora/{valid_corpus_key}/documents/{doc_id}",
+                f"{self._base_url}/v2/corpora/{valid_corpus_key}/documents/{doc_id}",
                 data=json.dumps(body),
                 verify=True,
                 headers=self._get_post_headers(),
