@@ -1,4 +1,5 @@
 """AgentQL Web Reader."""
+
 import httpx
 from typing import Optional, List
 
@@ -12,6 +13,8 @@ logging.getLogger("root").setLevel(logging.INFO)
 QUERY_DATA_ENDPOINT = "https://api.agentql.com/v1/query-data"
 API_TIMEOUT_SECONDS = 900
 
+REQUEST_ORIGIN = "llamaindex"
+
 
 class AgentQLWebReader(BasePydanticReader):
     """
@@ -20,6 +23,7 @@ class AgentQLWebReader(BasePydanticReader):
     Args:
         api_key (str): The AgentQL API key, get one at https://dev.agentql.com
         params (dict): Additional parameters to pass to the AgentQL API. Visit https://docs.agentql.com/rest-api/api-reference for details.
+
     """
 
     api_key: str
@@ -47,10 +51,15 @@ class AgentQLWebReader(BasePydanticReader):
 
         Returns:
             List[Document]: List of documents.
+
         """
         payload = {"url": url, "query": query, "prompt": prompt, "params": self.params}
 
-        headers = {"X-API-Key": f"{self.api_key}", "Content-Type": "application/json"}
+        headers = {
+            "X-API-Key": f"{self.api_key}",
+            "Content-Type": "application/json",
+            "X-TF-Request-Origin": REQUEST_ORIGIN,
+        }
 
         try:
             response = httpx.post(

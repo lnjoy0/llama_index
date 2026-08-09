@@ -1,6 +1,5 @@
 from typing import Any, List, Optional, Generator, Literal
 import os
-from urllib.parse import urlparse, urlunparse
 import httpx
 
 from llama_index.core.bridge.pydantic import Field, PrivateAttr, ConfigDict
@@ -92,6 +91,7 @@ class NVIDIARerank(BaseNodePostprocessor):
 
         API Key:
         - The recommended way to provide the API key is through the `NVIDIA_API_KEY` environment variable.
+
         """
         if not base_url or (base_url in KNOWN_URLS and not model):
             model = model or DEFAULT_MODEL
@@ -110,8 +110,6 @@ class NVIDIARerank(BaseNodePostprocessor):
         if self._is_hosted:  # hosted on API Catalog (build.nvidia.com)
             if (not self._api_key) or (self._api_key == "NO_API_KEY_PROVIDED"):
                 raise ValueError("An API key is required for hosted NIM.")
-        else:  # not hosted
-            self.base_url = self._validate_url(self.base_url)
 
         self.model = model
         if not self.model:
@@ -152,7 +150,8 @@ class NVIDIARerank(BaseNodePostprocessor):
         return self.base_url.rstrip("/")
 
     def _get_headers(self, auth_required: bool = False) -> dict:
-        """Return default headers for HTTP requests.
+        """
+        Return default headers for HTTP requests.
 
         If auth_required is True or the client is hosted, includes an Authorization header.
         """
@@ -172,18 +171,18 @@ class NVIDIARerank(BaseNodePostprocessor):
         response = client.get(url, headers=_headers)
         response.raise_for_status()
 
-        assert (
-            "data" in response.json()
-        ), "Response does not contain expected 'data' key"
-        assert isinstance(
-            response.json()["data"], list
-        ), "Response 'data' is not a list"
-        assert all(
-            isinstance(result, dict) for result in response.json()["data"]
-        ), "Response 'data' is not a list of dictionaries"
-        assert all(
-            "id" in result for result in response.json()["data"]
-        ), "Response 'rankings' is not a list of dictionaries with 'id'"
+        assert "data" in response.json(), (
+            "Response does not contain expected 'data' key"
+        )
+        assert isinstance(response.json()["data"], list), (
+            "Response 'data' is not a list"
+        )
+        assert all(isinstance(result, dict) for result in response.json()["data"]), (
+            "Response 'data' is not a list of dictionaries"
+        )
+        assert all("id" in result for result in response.json()["data"]), (
+            "Response 'rankings' is not a list of dictionaries with 'id'"
+        )
 
         # TODO: hosted now has a model listing, need to merge known and listed models
         # TODO: parse model config for local models
@@ -209,65 +208,6 @@ class NVIDIARerank(BaseNodePostprocessor):
             ]
         else:
             return RANKING_MODEL_TABLE
-
-    def _validate_url(self, base_url):
-        """
-        validate the base_url.
-        if the base_url is not a url, raise an error
-        if the base_url does not end in /v1, e.g. /embeddings
-        emit a warning. old documentation told users to pass in the full
-        inference url, which is incorrect and prevents model listing from working.
-        normalize base_url to end in /v1.
-        validate the base_url.
-        if the base_url is not a url, raise an error
-        if the base_url does not end in /v1, e.g. /embeddings
-        emit a warning. old documentation told users to pass in the full
-        inference url, which is incorrect and prevents model listing from working.
-        normalize base_url to end in /v1.
-        """
-        if base_url is not None:
-            parsed = urlparse(base_url)
-
-            # Ensure scheme and netloc (domain name) are present
-            if not (parsed.scheme and parsed.netloc):
-                expected_format = "Expected format is: http://host:port"
-                raise ValueError(
-                    f"Invalid base_url format. {expected_format} Got: {base_url}"
-                )
-
-            normalized_path = parsed.path.rstrip("/")
-            if not normalized_path.endswith("/v1"):
-                warnings.warn(
-                    f"{base_url} does not end in /v1, you may "
-                    "have inference and listing issues"
-                )
-                normalized_path += "/v1"
-
-                base_url = urlunparse(
-                    (parsed.scheme, parsed.netloc, normalized_path, None, None, None)
-                )
-        if base_url is not None:
-            parsed = urlparse(base_url)
-
-            # Ensure scheme and netloc (domain name) are present
-            if not (parsed.scheme and parsed.netloc):
-                expected_format = "Expected format is: http://host:port"
-                raise ValueError(
-                    f"Invalid base_url format. {expected_format} Got: {base_url}"
-                )
-
-            normalized_path = parsed.path.rstrip("/")
-            if not normalized_path.endswith("/v1"):
-                warnings.warn(
-                    f"{base_url} does not end in /v1, you may "
-                    "have inference and listing issues"
-                )
-                normalized_path += "/v1"
-
-                base_url = urlunparse(
-                    (parsed.scheme, parsed.netloc, normalized_path, None, None, None)
-                )
-        return base_url
 
     def _validate_model(self, model_name: str) -> None:
         """
@@ -279,6 +219,7 @@ class NVIDIARerank(BaseNodePostprocessor):
 
         Raises:
             ValueError: If the model is incompatible with the client.
+
         """
         model = determine_model(model_name)
         available_model_ids = [model.id for model in self.available_models]
@@ -390,19 +331,21 @@ class NVIDIARerank(BaseNodePostprocessor):
                 #         ...
                 #     ]
                 # }
-                assert (
-                    "rankings" in response.json()
-                ), "Response does not contain expected 'rankings' key"
-                assert isinstance(
-                    response.json()["rankings"], list
-                ), "Response 'rankings' is not a list"
+                assert "rankings" in response.json(), (
+                    "Response does not contain expected 'rankings' key"
+                )
+                assert isinstance(response.json()["rankings"], list), (
+                    "Response 'rankings' is not a list"
+                )
                 assert all(
                     isinstance(result, dict) for result in response.json()["rankings"]
                 ), "Response 'rankings' is not a list of dictionaries"
                 assert all(
                     "index" in result and "logit" in result
                     for result in response.json()["rankings"]
-                ), "Response 'rankings' is not a list of dictionaries with 'index' and 'logit' keys"
+                ), (
+                    "Response 'rankings' is not a list of dictionaries with 'index' and 'logit' keys"
+                )
                 for result in response.json()["rankings"][: self.top_n]:
                     results.append(
                         NodeWithScore(

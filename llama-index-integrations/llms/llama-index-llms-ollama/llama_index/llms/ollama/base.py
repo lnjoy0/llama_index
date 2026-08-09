@@ -1,46 +1,47 @@
-from ollama import Client, AsyncClient
 from typing import (
     TYPE_CHECKING,
     Any,
+    AsyncGenerator,
     Dict,
+    Generator,
     List,
     Optional,
     Sequence,
     Tuple,
     Type,
     Union,
-    Generator,
-    AsyncGenerator,
 )
 
+from ollama import AsyncClient, Client
+
 from llama_index.core.base.llms.generic_utils import (
-    chat_to_completion_decorator,
     achat_to_completion_decorator,
-    stream_chat_to_completion_decorator,
     astream_chat_to_completion_decorator,
+    chat_to_completion_decorator,
+    stream_chat_to_completion_decorator,
 )
 from llama_index.core.base.llms.types import (
     ChatMessage,
     ChatResponse,
-    ChatResponseGen,
     ChatResponseAsyncGen,
+    ChatResponseGen,
     CompletionResponse,
     CompletionResponseAsyncGen,
     CompletionResponseGen,
+    ImageBlock,
     LLMMetadata,
     MessageRole,
     TextBlock,
-    ImageBlock,
 )
-from llama_index.core.bridge.pydantic import BaseModel, Field, PrivateAttr
+from llama_index.core.bridge.pydantic import Field, PrivateAttr
 from llama_index.core.constants import DEFAULT_CONTEXT_WINDOW, DEFAULT_NUM_OUTPUTS
 from llama_index.core.instrumentation import get_dispatcher
 from llama_index.core.llms.callbacks import llm_chat_callback, llm_completion_callback
 from llama_index.core.llms.function_calling import FunctionCallingLLM
+from llama_index.core.llms.llm import ToolSelection, Model
+from llama_index.core.program.utils import process_streaming_objects, FlexibleModel
 from llama_index.core.prompts import PromptTemplate
-from llama_index.core.tools import ToolSelection
 from llama_index.core.types import PydanticProgramMode
-from llama_index.core.program.utils import process_streaming_objects
 
 if TYPE_CHECKING:
     from llama_index.core.tools.types import BaseTool
@@ -62,7 +63,8 @@ def force_single_tool_call(response: ChatResponse) -> None:
 
 
 class Ollama(FunctionCallingLLM):
-    """Ollama LLM.
+    """
+    Ollama LLM.
 
     Visit https://ollama.com/ to download and install Ollama.
 
@@ -81,6 +83,7 @@ class Ollama(FunctionCallingLLM):
         response = llm.complete("What is the capital of France?")
         print(response)
         ```
+
     """
 
     base_url: str = Field(
@@ -88,16 +91,13 @@ class Ollama(FunctionCallingLLM):
         description="Base url the model is hosted under.",
     )
     model: str = Field(description="The Ollama model to use.")
-    temperature: float = Field(
-        default=0.75,
+    temperature: Optional[float] = Field(
+        default=None,
         description="The temperature to use for sampling.",
-        ge=0.0,
-        le=1.0,
     )
     context_window: int = Field(
-        default=DEFAULT_CONTEXT_WINDOW,
+        default=-1,
         description="The maximum number of context tokens for the model.",
-        gt=0,
     )
     request_timeout: float = Field(
         default=DEFAULT_REQUEST_TIMEOUT,
@@ -130,12 +130,12 @@ class Ollama(FunctionCallingLLM):
         self,
         model: str,
         base_url: str = "http://localhost:11434",
-        temperature: float = 0.75,
-        context_window: int = DEFAULT_CONTEXT_WINDOW,
-        request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        temperature: Optional[float] = None,
+        context_window: int = -1,
+        request_timeout: Optional[float] = DEFAULT_REQUEST_TIMEOUT,
         prompt_key: str = "prompt",
         json_mode: bool = False,
-        additional_kwargs: Dict[str, Any] = {},
+        additional_kwargs: Optional[Dict[str, Any]] = None,
         client: Optional[Client] = None,
         async_client: Optional[AsyncClient] = None,
         is_function_calling_model: bool = True,
@@ -150,7 +150,7 @@ class Ollama(FunctionCallingLLM):
             request_timeout=request_timeout,
             prompt_key=prompt_key,
             json_mode=json_mode,
-            additional_kwargs=additional_kwargs,
+            additional_kwargs=additional_kwargs or {},
             is_function_calling_model=is_function_calling_model,
             keep_alive=keep_alive,
             **kwargs,
@@ -167,7 +167,7 @@ class Ollama(FunctionCallingLLM):
     def metadata(self) -> LLMMetadata:
         """LLM metadata."""
         return LLMMetadata(
-            context_window=self.context_window,
+            context_window=self.get_context_window(),
             num_output=DEFAULT_NUM_OUTPUTS,
             model_name=self.model,
             is_chat_model=True,  # Ollama supports chat API for all models
@@ -193,12 +193,26 @@ class Ollama(FunctionCallingLLM):
     def _model_kwargs(self) -> Dict[str, Any]:
         base_kwargs = {
             "temperature": self.temperature,
-            "num_ctx": self.context_window,
+            "num_ctx": self.get_context_window(),
         }
         return {
             **base_kwargs,
             **self.additional_kwargs,
         }
+
+    def get_context_window(self) -> int:
+        if self.context_window == -1:
+            # Try to get the context window from the model info if not set
+            info = self.client.show(self.model).modelinfo
+            for key, value in info.items():
+                if "context_length" in key:
+                    self.context_window = int(value)
+                    break
+
+        # If the context window is still -1, use the default context window
+        return (
+            self.context_window if self.context_window != -1 else DEFAULT_CONTEXT_WINDOW
+        )
 
     def _convert_to_ollama_messages(self, messages: Sequence[ChatMessage]) -> Dict:
         ollama_messages = []
@@ -532,11 +546,11 @@ class Ollama(FunctionCallingLLM):
     @dispatcher.span
     def structured_predict(
         self,
-        output_cls: Type[BaseModel],
+        output_cls: Type[Model],
         prompt: PromptTemplate,
         llm_kwargs: Optional[Dict[str, Any]] = None,
         **prompt_args: Any,
-    ) -> BaseModel:
+    ) -> Model:
         if self.pydantic_program_mode == PydanticProgramMode.DEFAULT:
             llm_kwargs = llm_kwargs or {}
             llm_kwargs["format"] = output_cls.model_json_schema()
@@ -553,11 +567,11 @@ class Ollama(FunctionCallingLLM):
     @dispatcher.span
     async def astructured_predict(
         self,
-        output_cls: Type[BaseModel],
+        output_cls: Type[Model],
         prompt: PromptTemplate,
         llm_kwargs: Optional[Dict[str, Any]] = None,
         **prompt_args: Any,
-    ) -> BaseModel:
+    ) -> Model:
         if self.pydantic_program_mode == PydanticProgramMode.DEFAULT:
             llm_kwargs = llm_kwargs or {}
             llm_kwargs["format"] = output_cls.model_json_schema()
@@ -574,12 +588,13 @@ class Ollama(FunctionCallingLLM):
     @dispatcher.span
     def stream_structured_predict(
         self,
-        output_cls: Type[BaseModel],
+        output_cls: Type[Model],
         prompt: PromptTemplate,
         llm_kwargs: Optional[Dict[str, Any]] = None,
         **prompt_args: Any,
-    ) -> Generator[Union[BaseModel, List[BaseModel]], None, None]:
-        """Stream structured predictions as they are generated.
+    ) -> Generator[Union[Model, FlexibleModel], None, None]:
+        """
+        Stream structured predictions as they are generated.
 
         Args:
             output_cls: The Pydantic class to parse responses into
@@ -589,15 +604,16 @@ class Ollama(FunctionCallingLLM):
 
         Returns:
             Generator yielding partial objects as they are generated
+
         """
         if self.pydantic_program_mode == PydanticProgramMode.DEFAULT:
 
             def gen(
-                output_cls: Type[BaseModel],
+                output_cls: Type[Model],
                 prompt: PromptTemplate,
                 llm_kwargs: Dict[str, Any],
                 prompt_args: Dict[str, Any],
-            ) -> Generator[Union[BaseModel, List[BaseModel]], None, None]:
+            ) -> Generator[Union[Model, FlexibleModel], None, None]:
                 llm_kwargs = llm_kwargs or {}
                 llm_kwargs["format"] = output_cls.model_json_schema()
 
@@ -630,20 +646,20 @@ class Ollama(FunctionCallingLLM):
     @dispatcher.span
     async def astream_structured_predict(
         self,
-        output_cls: Type[BaseModel],
+        output_cls: Type[Model],
         prompt: PromptTemplate,
         llm_kwargs: Optional[Dict[str, Any]] = None,
         **prompt_args: Any,
-    ) -> AsyncGenerator[Union[BaseModel, List[BaseModel]], None]:
+    ) -> AsyncGenerator[Union[Model, FlexibleModel], None]:
         """Async version of stream_structured_predict."""
         if self.pydantic_program_mode == PydanticProgramMode.DEFAULT:
 
             async def gen(
-                output_cls: Type[BaseModel],
+                output_cls: Type[Model],
                 prompt: PromptTemplate,
                 llm_kwargs: Dict[str, Any],
                 prompt_args: Dict[str, Any],
-            ) -> AsyncGenerator[Union[BaseModel, List[BaseModel]], None]:
+            ) -> AsyncGenerator[Union[Model, FlexibleModel], None]:
                 llm_kwargs = llm_kwargs or {}
                 llm_kwargs["format"] = output_cls.model_json_schema()
 

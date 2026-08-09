@@ -1,29 +1,30 @@
 import asyncio
-import uuid
 import functools
+import uuid
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    Type,
+)
+
 from llama_index.core.bridge.pydantic import (
     BaseModel,
-    Field,
     ConfigDict,
+    Field,
 )
-from typing import (
-    Optional,
-    Dict,
-    Any,
-    List,
-    Protocol,
-    TYPE_CHECKING,
-    Type,
-    Awaitable,
-    Set,
-)
-from llama_index.core.workflow.context import Context
 from llama_index.core.workflow.context_serializers import BaseSerializer, JsonSerializer
-from llama_index.core.workflow.handler import WorkflowHandler
-from llama_index.core.workflow.events import Event
 from llama_index.core.workflow.errors import WorkflowStepDoesNotExistError
+from llama_index.core.workflow.events import Event
 
 if TYPE_CHECKING:  # pragma: no cover
+    from .context import Context
+    from .handler import WorkflowHandler
     from .workflow import Workflow
 
 
@@ -33,10 +34,9 @@ class CheckpointCallback(Protocol):
         run_id: str,
         last_completed_step: Optional[str],
         input_ev: Optional[Event],
-        output_ev: Event,
-        ctx: Context,
-    ) -> Awaitable[None]:
-        ...
+        output_ev: Optional[Event],
+        ctx: "Context",
+    ) -> Awaitable[None]: ...
 
 
 class Checkpoint(BaseModel):
@@ -44,12 +44,13 @@ class Checkpoint(BaseModel):
     id_: str = Field(default_factory=lambda: str(uuid.uuid4()))
     last_completed_step: Optional[str]
     input_event: Optional[Event]
-    output_event: Event
+    output_event: Optional[Event]
     ctx_state: Dict[str, Any]
 
 
 class WorkflowCheckpointer:
-    """An object that creates and maintain's checkpoints during a Workflow run.
+    """
+    An object that creates and maintain's checkpoints during a Workflow run.
 
     This checkpoint manager object works with multiple run's of a Workflow instance
     or from several different instances. Specified checkpoints can also be used
@@ -64,13 +65,15 @@ class WorkflowCheckpointer:
         checkpoint_serializer: Optional[BaseSerializer] = None,
         disabled_steps: List[str] = [],
     ):
-        """Create a WorkflowCheckpointer object.
+        """
+        Create a WorkflowCheckpointer object.
 
         Args:
             workflow (Workflow): The wrapped workflow.
             checkpoint_serializer (Optional[BaseSerializer], optional): The serializer to use
                 for serializing associated `Context` of a Workflow run. Defaults to None.
             disabled_steps (List[str], optional): Steps for which to disable checkpointing. Defaults to [].
+
         """
         self._checkpoints: Dict[str, List[Checkpoint]] = {}
         self._checkpoint_serializer = checkpoint_serializer or JsonSerializer()
@@ -101,14 +104,14 @@ class WorkflowCheckpointer:
         except KeyError:
             pass
 
-    def run(self, **kwargs: Any) -> WorkflowHandler:
+    def run(self, **kwargs: Any) -> "WorkflowHandler":
         """Run the workflow with checkpointing."""
         return self.workflow.run(
             checkpoint_callback=self.new_checkpoint_callback_for_run(),
             **kwargs,
         )
 
-    def run_from(self, checkpoint: Checkpoint, **kwargs: Any) -> WorkflowHandler:
+    def run_from(self, checkpoint: Checkpoint, **kwargs: Any) -> "WorkflowHandler":
         """Run the attached workflow from the specified checkpoint."""
         return self.workflow.run_from(
             checkpoint=checkpoint,
@@ -128,8 +131,8 @@ class WorkflowCheckpointer:
             run_id: str,
             last_completed_step: Optional[str],
             input_ev: Optional[Event],
-            output_ev: Event,
-            ctx: Context,
+            output_ev: Optional[Event],
+            ctx: "Context",
         ) -> None:
             """Build a checkpoint around the last completed step."""
             if last_completed_step not in self.enabled_checkpoints:
@@ -156,13 +159,13 @@ class WorkflowCheckpointer:
         input_event_type: Optional[Type[Event]],
         output_event_type: Optional[Type[Event]],
     ) -> bool:
-        if last_completed_step and ckpt.last_completed_step != last_completed_step:
+        if last_completed_step and ckpt.last_completed_step is not last_completed_step:
             return False
-        if input_event_type and type(ckpt.input_event) != input_event_type:
+        if input_event_type and type(ckpt.input_event) is not input_event_type:
             return False
-        if output_event_type and type(ckpt.output_event) != output_event_type:
+        if output_event_type and type(ckpt.output_event) is not output_event_type:  # noqa: SIM103
             return False
-        return True
+        return True  # noqa: SIM103
 
     def filter_checkpoints(
         self,
