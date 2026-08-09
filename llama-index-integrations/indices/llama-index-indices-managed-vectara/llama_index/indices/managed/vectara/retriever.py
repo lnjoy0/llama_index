@@ -338,7 +338,7 @@ class VectaraRetriever(BaseRetriever):
                 model_parameters["presence_penalty"] = self._presence_penalty
 
             if len(model_parameters) > 0:
-                summary_config["model_parameters"] = model_paramters
+                summary_config["model_parameters"] = model_parameters
 
             citations_config = {}
             if self._citations_style:
@@ -392,7 +392,7 @@ class VectaraRetriever(BaseRetriever):
                 conv_id = conv_id or self._conv_id
                 response = self._index._session.post(
                     headers=self._get_post_headers(),
-                    url=f"https://api.vectara.io/v2/chats/{conv_id}/turns",
+                    url=f"{self._index._base_url}/v2/chats/{conv_id}/turns",
                     data=json.dumps(body),
                     timeout=self._index.vectara_api_timeout,
                     stream=True,
@@ -400,7 +400,7 @@ class VectaraRetriever(BaseRetriever):
             else:
                 response = self._index._session.post(
                     headers=self._get_post_headers(),
-                    url="https://api.vectara.io/v2/chats",
+                    url=f"{self._index._base_url}/v2/chats",
                     data=json.dumps(body),
                     timeout=self._index.vectara_api_timeout,
                     stream=True,
@@ -409,7 +409,7 @@ class VectaraRetriever(BaseRetriever):
         else:
             response = self._index._session.post(
                 headers=self._get_post_headers(),
-                url="https://api.vectara.io/v2/query",
+                url=f"{self._index._base_url}/v2/query",
                 data=json.dumps(body),
                 timeout=self._index.vectara_api_timeout,
                 stream=True,
@@ -456,9 +456,16 @@ class VectaraRetriever(BaseRetriever):
                                                     text=search_result["text"]
                                                 ),
                                                 id_=search_result["document_id"],
-                                                metadata=search_result[
-                                                    "document_metadata"
-                                                ],
+                                                metadata={
+                                                    # Metadata from the matched part
+                                                    **search_result.get(
+                                                        "part_metadata", {}
+                                                    ),
+                                                    # Document-level metadata
+                                                    "document": search_result.get(
+                                                        "document_metadata", {}
+                                                    ),
+                                                },
                                             ),
                                             score=search_result["score"],
                                         )
@@ -518,14 +525,14 @@ class VectaraRetriever(BaseRetriever):
             if conv_id:
                 response = self._index._session.post(
                     headers=self._get_post_headers(),
-                    url=f"https://api.vectara.io/v2/chats/{conv_id}/turns",
+                    url=f"{self._index._base_url}/v2/chats/{conv_id}/turns",
                     data=json.dumps(data),
                     timeout=self._index.vectara_api_timeout,
                 )
             else:
                 response = self._index._session.post(
                     headers=self._get_post_headers(),
-                    url="https://api.vectara.io/v2/chats",
+                    url=f"{self._index._base_url}/v2/chats",
                     data=json.dumps(data),
                     timeout=self._index.vectara_api_timeout,
                 )
@@ -533,7 +540,7 @@ class VectaraRetriever(BaseRetriever):
         else:
             response = self._index._session.post(
                 headers=self._get_post_headers(),
-                url="https://api.vectara.io/v2/query",
+                url=f"{self._index._base_url}/v2/query",
                 data=json.dumps(data),
                 timeout=self._index.vectara_api_timeout,
             )
@@ -570,7 +577,12 @@ class VectaraRetriever(BaseRetriever):
                 node=Node(
                     text_resource=MediaResource(text=search_result["text"]),
                     id_=search_result["document_id"],
-                    metadata=search_result["document_metadata"],
+                    metadata={
+                        # Metadata from the matched part
+                        **search_result.get("part_metadata", {}),
+                        # Document-level metadata
+                        "document": search_result.get("document_metadata", {}),
+                    },
                 ),
                 score=search_result["score"],
             )
