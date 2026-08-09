@@ -1,20 +1,19 @@
 import asyncio
-import pytest
 import random
-from unittest.mock import patch, MagicMock
-from typing import Coroutine
+from unittest.mock import MagicMock, patch
 
-from llama_index.core.workflow.events import StartEvent, StopEvent
-from llama_index.core.workflow.handler import WorkflowHandler
+import pytest
+from llama_index.core.workflow.checkpointer import WorkflowCheckpointer
 from llama_index.core.workflow.events import (
     StartEvent,
     StopEvent,
 )
+from llama_index.core.workflow.handler import WorkflowHandler
 from llama_index.core.workflow.workflow import (
     Context,
 )
-from llama_index.core.workflow.checkpointer import WorkflowCheckpointer
-from .conftest import OneTestEvent, DummyWorkflow, LastEvent
+
+from .conftest import DummyWorkflow, LastEvent, OneTestEvent
 
 
 @pytest.fixture()
@@ -22,7 +21,7 @@ def workflow_checkpointer(workflow: DummyWorkflow):
     return WorkflowCheckpointer(workflow=workflow)
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_create_checkpoint(workflow_checkpointer: WorkflowCheckpointer):
     incoming_ev = StartEvent()
     output_ev = OneTestEvent()
@@ -47,7 +46,7 @@ async def test_create_checkpoint(workflow_checkpointer: WorkflowCheckpointer):
     assert ckpt.ctx_state == ctx.to_dict()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_checkpoints_after_successive_runs(
     workflow_checkpointer: WorkflowCheckpointer,
 ):
@@ -68,7 +67,7 @@ async def test_checkpoints_after_successive_runs(
         ]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_filter_checkpoints(workflow_checkpointer: WorkflowCheckpointer):
     num_runs = 2
     for _ in range(num_runs):
@@ -79,7 +78,7 @@ async def test_filter_checkpoints(workflow_checkpointer: WorkflowCheckpointer):
     steps = ["start_step", "middle_step", "end_step"]  # sequential workflow
     for step in steps:
         checkpoints = workflow_checkpointer.filter_checkpoints(last_completed_step=step)
-        assert len(checkpoints) == num_runs, f"fails on step: {step.__name__}"
+        assert len(checkpoints) == num_runs, f"fails on step: {step}"
 
     # filter by input and output event
     event_types = [StartEvent, OneTestEvent, LastEvent, StopEvent]
@@ -89,9 +88,9 @@ async def test_filter_checkpoints(workflow_checkpointer: WorkflowCheckpointer):
             checkpoints_by_input_event = workflow_checkpointer.filter_checkpoints(
                 input_event_type=evt_type
             )
-            assert (
-                len(checkpoints_by_input_event) == num_runs
-            ), f"fails on {evt_type.__name__}"
+            assert len(checkpoints_by_input_event) == num_runs, (
+                f"fails on {evt_type.__name__}"
+            )
 
         # by output_event_type
         if evt_type != StartEvent:
@@ -105,14 +104,14 @@ async def test_filter_checkpoints(workflow_checkpointer: WorkflowCheckpointer):
         workflow_checkpointer.filter_checkpoints()
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_checkpoints_works_with_new_instances_concurrently(
     workflow_checkpointer: WorkflowCheckpointer,
 ):
     num_instances = 3
     tasks = []
 
-    async def add_random_startup(coro: Coroutine):
+    async def add_random_startup(coro: WorkflowHandler):
         """To randomly mix up the processing of the 3 runs."""
         startup = random.random()
         await asyncio.sleep(startup)
@@ -135,7 +134,7 @@ async def test_checkpoints_works_with_new_instances_concurrently(
         ]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 async def test_run_from_checkpoint(workflow_checkpointer: WorkflowCheckpointer):
     num_steps = len(workflow_checkpointer.workflow._get_steps())
     num_ckpts_in_single_run = num_steps - 1
@@ -161,7 +160,7 @@ async def test_run_from_checkpoint(workflow_checkpointer: WorkflowCheckpointer):
     assert num_checkpoints == [1, num_ckpts_in_single_run]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch("llama_index.core.workflow.workflow.uuid")
 async def test_checkpointer_with_stepwise(
     mock_uuid: MagicMock,
@@ -172,18 +171,22 @@ async def test_checkpointer_with_stepwise(
     stepwise_run_id = "stepwise_run"
     mock_uuid.uuid4.return_value = stepwise_run_id
     handler = workflow_checkpointer.run(stepwise=True)
+    assert handler.ctx
 
-    event = await handler.run_step()
+    events = await handler.run_step()
+    assert events
     assert len(workflow_checkpointer.checkpoints[stepwise_run_id]) == 1
-    handler.ctx.send_event(event)
+    handler.ctx.send_event(events[0])
 
-    event = await handler.run_step()
+    events = await handler.run_step()
+    assert events
     assert len(workflow_checkpointer.checkpoints[stepwise_run_id]) == 2
-    handler.ctx.send_event(event)
+    handler.ctx.send_event(events[0])
 
-    event = await handler.run_step()
+    events = await handler.run_step()
+    assert events
     assert len(workflow_checkpointer.checkpoints[stepwise_run_id]) == 3
-    handler.ctx.send_event(event)
+    handler.ctx.send_event(events[0])
 
     _ = await handler.run_step()
     result = await handler
@@ -212,7 +215,7 @@ async def test_checkpointer_with_stepwise(
     ] == ["end_step"]
 
 
-@pytest.mark.asyncio()
+@pytest.mark.asyncio
 @patch("llama_index.core.workflow.workflow.uuid")
 async def test_disable_and_enable_checkpoints(
     mock_uuid: MagicMock,
